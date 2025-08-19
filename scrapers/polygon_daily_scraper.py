@@ -143,7 +143,11 @@ class PolygonDailyScraper:
                     
                     return data
                 else:
-                    logger.error(f"API returned status: {data.get('status')} for {market_date}")
+                    st = data.get('status')
+                    if st == 'DELAYED':
+                        logger.info(f"Daily data not ready yet (status=DELAYED) for {market_date}; will skip for now")
+                        return {'status': 'DELAYED', 'market_date': market_date}
+                    logger.error(f"API returned status: {st} for {market_date}")
                     return None
                     
             except requests.exceptions.RequestException as e:
@@ -219,7 +223,11 @@ class PolygonDailyScraper:
             # Fetch data
             market_data = self.get_daily_market_summary(date_str, include_otc=include_otc)
             
-            if market_data:
+            if isinstance(market_data, dict) and market_data.get('status') == 'DELAYED':
+                logger.info(f"Skipping {date_str} - daily snapshot DELAYED")
+                results['skipped_dates'] += 1
+                results['skipped_dates_list'].append(date_str)
+            elif market_data:
                 # Store in database using high-performance bulk loading
                 try:
                     record_count = market_data.get('resultsCount', 0)

@@ -328,6 +328,9 @@ class DataRetentionManager:
             {'table_name': 'daily_stock_snapshot', 'date_column': 'date'},
             {'table_name': 'option_contracts', 'date_column': 'date'},
             {'table_name': 'daily_option_snapshot', 'date_column': 'date'},
+            # For intraday temp snapshot retention, use created_at (timestamp) for age cutoff
+            {'table_name': 'temp_stock_snapshot', 'date_column': 'created_at'},
+            {'table_name': 'temp_option_snapshot', 'date_column': 'as_of_timestamp'},
             {'table_name': 'schema_migrations', 'date_column': 'applied_at'}
         ]
         

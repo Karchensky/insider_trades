@@ -1,0 +1,61 @@
+name: Intraday Snapshots
+
+on:
+  schedule:
+    # Weekdays every 5 minutes between 14:35 and 21:15 UTC (~ 9:35am to 4:15pm ET; ET offset varies with DST)
+    - cron: '*/5 14-21 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      retention:
+        description: 'Retention in business days'
+        required: false
+        default: '1'
+      include_otc:
+        description: 'Include OTC (true/false)'
+        required: false
+        default: 'false'
+      options_limit:
+        description: 'Unified options page size (<=250)'
+        required: false
+        default: '250'
+      options_max_pages:
+        description: 'Unified options pages per iteration'
+        required: false
+        default: '4'
+
+jobs:
+  run-intraday:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      INTRADAY_RETENTION_DAYS: ${{ github.event.inputs.retention || '1' }}
+      INTRADAY_OPTIONS_LIMIT: ${{ github.event.inputs.options_limit || '250' }}
+      INTRADAY_OPTIONS_MAX_PAGES: ${{ github.event.inputs.options_max_pages || '4' }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run migrations
+        run: |
+          python migrate.py migrate
+
+      - name: Run intraday snapshots iteration
+        run: |
+          python intraday_schedule.py \
+            --retention ${INTRADAY_RETENTION_DAYS} \
+            $([ "${{ github.event.inputs.include_otc || 'false' }}" = "true" ] && echo "--include-otc" || true)
+
+
