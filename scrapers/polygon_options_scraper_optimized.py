@@ -258,8 +258,7 @@ class OptimizedPolygonOptionsContractsScraper(PolygonOptionsContractsScraper):
         
         logger.info(f"Processing {len(underlying_tickers)} tickers with concurrent API calls...")
         
-        # Process tickers in batches to manage memory and rate limits
-        all_api_responses = []
+        # Process tickers in batches; bulk-load after each batch to avoid gigantic single upserts
         batch_start_time = time.time()
         
         for i in range(0, len(underlying_tickers), self.batch_size):
@@ -271,7 +270,6 @@ class OptimizedPolygonOptionsContractsScraper(PolygonOptionsContractsScraper):
             
             # Fetch options for this batch
             batch_responses = self.get_option_contracts_batch(batch_tickers, target_date)
-            all_api_responses.extend(batch_responses)
             
             # Update statistics
             results['successful_api_calls'] += len(batch_responses)
@@ -283,30 +281,23 @@ class OptimizedPolygonOptionsContractsScraper(PolygonOptionsContractsScraper):
             actual_api_rate = len(batch_responses) / batch_time if batch_time > 0 else 0
             logger.info(f"Batch {batch_num} completed: {len(batch_responses)}/{len(batch_tickers)} successful ({actual_api_rate:.1f} API calls/sec, current delay: {self.current_delay:.3f}s)")
             
-            batch_start_time = time.time()
-        
-        # Bulk load all option contracts in one operation
-        if all_api_responses:
-            logger.info(f"Bulk loading option contracts from {len(all_api_responses)} API responses...")
-            
+            # Bulk load this batch immediately to avoid giant single upserts across all batches
             try:
-                success = self.bulk_loader.bulk_insert_option_contracts_batch(
-                    all_api_responses, target_date, method='auto'
-                )
-                
-                if success:
-                    # Count total contracts
-                    total_contracts = sum(len(resp.get('results', [])) for resp in all_api_responses)
-                    results['total_contracts_inserted'] = total_contracts
-                    
-                    logger.info(f"✓ Successfully bulk-loaded {total_contracts:,} option contracts")
-                else:
-                    logger.error("Bulk loading failed")
-                    
+                if batch_responses:
+                    logger.info(f"Bulk loading option contracts for batch {batch_num}/{total_batches}…")
+                    success = self.bulk_loader.bulk_insert_option_contracts_batch(
+                        batch_responses, target_date, method='auto'
+                    )
+                    if success:
+                        batch_contracts = sum(len(r.get('results', [])) for r in batch_responses)
+                        results['total_contracts_inserted'] += batch_contracts
+                        logger.info(f"✓ Batch {batch_num}/{total_batches} loaded {batch_contracts:,} contracts (running total={results['total_contracts_inserted']:,})")
+                    else:
+                        logger.error(f"Bulk loading failed for batch {batch_num}/{total_batches}")
             except Exception as e:
-                logger.error(f"Bulk loading error: {e}")
-                results['failed_api_calls'] += results['successful_api_calls']
-                results['successful_api_calls'] = 0
+                logger.error(f"Bulk loading error for batch {batch_num}/{total_batches}: {e}")
+
+            batch_start_time = time.time()
         
         # Calculate final statistics
         total_time = time.time() - start_time

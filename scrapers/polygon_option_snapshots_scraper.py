@@ -115,52 +115,57 @@ class PolygonOptionSnapshotsScraper(OptimizedPolygonOptionsContractsScraper):
         for attempt in range(self.max_retries):
             try:
                 response = self.session.get(url, params=params, timeout=30)
-                
-                # Handle rate limiting with dynamic backoff
+
+                # Rate limiting with backoff
                 if response.status_code == 429:
-                    # Increase delay for future requests
                     self.current_delay = min(self.current_delay * self.backoff_multiplier, 1.0)
                     self.success_streak = 0
-                    
                     wait_time = self.retry_delay * (2 ** attempt)
                     logger.warning(f"Rate limited for {contract_ticker}, increasing delay to {self.current_delay:.3f}s, waiting {wait_time}s...")
                     time.sleep(wait_time)
                     continue
-                
+
+                # Treat 404 as NOT_FOUND and skip without retrying further
+                if response.status_code == 404:
+                    logger.debug(f"{contract_ticker} snapshot NOT_FOUND (404) for {date_str}, skipping")
+                    return None
+
+                # Parse JSON even if non-200 where possible
                 response.raise_for_status()
                 data = response.json()
-                
-                if data.get('status') == 'OK':
-                    # Success - potentially decrease delay
+
+                status = data.get('status')
+                if status == 'OK':
                     self.success_streak += 1
                     if self.dynamic_rate_limiting and self.success_streak >= 10:
-                        # After 10 successful requests, try to speed up slightly
                         self.current_delay = max(self.current_delay * 0.95, self.request_delay)
                         self.success_streak = 0
-                    
-                    logger.debug(f"✓ {contract_ticker}: snapshot retrieved")
-                    
-                    # Add metadata for tracking
+
+                    # Annotate
                     data['contract_ticker'] = contract_ticker
                     data['requested_date'] = date_str
                     data['fetch_timestamp'] = datetime.now().isoformat()
-                    
                     return data
-                else:
-                    logger.warning(f"API returned status: {data.get('status')} for {contract_ticker}")
+
+                if status == 'NOT_FOUND':
+                    logger.debug(f"{contract_ticker} snapshot NOT_FOUND for {date_str}, skipping")
                     return None
-                    
+
+                logger.warning(f"Unexpected status '{status}' for {contract_ticker} {date_str}, skipping")
+                return None
+
             except requests.exceptions.RequestException as e:
                 if attempt < self.max_retries - 1:
                     wait_time = self.retry_delay * (2 ** attempt)
                     logger.debug(f"Request failed for {contract_ticker} (attempt {attempt + 1}), retrying in {wait_time}s: {e}")
                     time.sleep(wait_time)
                 else:
-                    logger.error(f"Failed to fetch snapshot for {contract_ticker} after {self.max_retries} attempts: {e}")
+                    # If it was a 404 it would have returned above; other errors after retries -> skip
+                    logger.warning(f"Skipping {contract_ticker} after {self.max_retries} attempts: {e}")
                 continue
             except Exception as e:
-                logger.error(f"Unexpected error for {contract_ticker}: {e}")
-                break
+                logger.warning(f"Skipping {contract_ticker} due to unexpected error: {e}")
+                return None
         
         return None
     
