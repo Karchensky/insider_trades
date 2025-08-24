@@ -24,8 +24,7 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from scrapers.polygon_daily_scraper import PolygonDailyScraper
-from scrapers.polygon_options_scraper_optimized import OptimizedPolygonOptionsContractsScraper
-from scrapers.polygon_option_snapshots_scraper import PolygonOptionSnapshotsScraper
+from scrapers.polygon_option_flatfile_loader import PolygonOptionFlatFileLoader
 from maintenance.data_retention import DataRetentionManager
 
 
@@ -46,34 +45,59 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     logger.info(f"Processing trading days: {start_date} → {end_date}")
 
     # 2) Populate daily_stock_snapshot
-    logger.info("[daily_stock_snapshot] Step 1/3: loading…")
+    logger.info("[daily_stock_snapshot] Step 1/2: loading…")
     stock_results = stock_scraper.scrape_date_range(
         start_date, end_date, include_otc=include_otc, skip_existing=not force
     )
     logger.info(f"[daily_stock_snapshot] inserted={stock_results['total_records_inserted']:,} dates_ok={stock_results['successful_scrapes']} skipped={stock_results['skipped_dates']}")
 
-    # 3) Populate option_contracts
-    logger.info("[option_contracts] Step 2/3: loading…")
-    contracts_scraper = OptimizedPolygonOptionsContractsScraper()
-    contracts_results = contracts_scraper.scrape_options_date_range_optimized(
-        start_date, end_date, ticker_limit=ticker_limit, skip_existing=not force
-    )
-    logger.info(f"[option_contracts] inserted={contracts_results['total_contracts_inserted']:,} success_dates={contracts_results['successful_dates']} skipped={contracts_results['skipped_dates']}")
+    # 3) Populate daily_option_snapshot via flat files
+    logger.info("[daily_option_snapshot] Step 2/2: loading from flat files…")
+    ff_loader = PolygonOptionFlatFileLoader()
+    from datetime import datetime as _dt, timedelta as _td
+    s = _dt.strptime(start_date, '%Y-%m-%d').date()
+    e = _dt.strptime(end_date, '%Y-%m-%d').date()
+    cur = s
+    while cur <= e:
+        ds = cur.strftime('%Y-%m-%d')
+        try:
+            res = ff_loader.load_for_date(ds, skip_existing=not force)
+            logger.info(f"[daily_option_snapshot] {ds} loaded: success={res.get('success')}")
+        except Exception as fe:
+            logger.error(f"[daily_option_snapshot] {ds} failed: {fe}")
+        cur += _td(days=1)
 
-    # 4) Populate daily_option_snapshot
-    logger.info("[daily_option_snapshot] Step 3/3: loading…")
-    snapshots_scraper = PolygonOptionSnapshotsScraper()
-    snapshots_results = snapshots_scraper.scrape_snapshots_date_range(
-        start_date, end_date, contract_limit=contract_limit, skip_existing=not force
-    )
-    logger.info(f"[daily_option_snapshot] inserted={snapshots_results['total_snapshots_inserted']:,} success_dates={snapshots_results['successful_dates']} skipped={snapshots_results['skipped_dates']}")
+    # Copy latest temp_option_snapshot rows into daily_option_snapshot_full for the processed dates
+    from database.bulk_operations import BulkStockDataLoader as _Loader
+    _l = _Loader()
+    cur = s
+    while cur <= e:
+        ds = cur.strftime('%Y-%m-%d')
+        try:
+            out = _l.upsert_daily_option_snapshot_full_from_temp(ds)
+            logger.info(f"[daily_option_snapshot_full] {ds} upserted={out['records_upserted']} in {out['execution_time']:.2f}s")
+        except Exception as ce:
+            logger.error(f"[daily_option_snapshot_full] {ds} copy failed: {ce}")
+        cur += _td(days=1)
+
+    # Truncate temp_option_snapshot and temp_stock_snapshot to keep only fresh intraday going forward
+    try:
+        from database.connection import db as _db
+        _db.execute_command("TRUNCATE TABLE temp_option_snapshot;")
+        logger.info("[temp_option_snapshot] truncated after daily snapshot capture")
+        try:
+            _db.execute_command("TRUNCATE TABLE temp_stock_snapshot;")
+            logger.info("[temp_stock_snapshot] truncated after daily snapshot capture")
+        except Exception as te2:
+            logger.error(f"[temp_stock_snapshot] truncate failed: {te2}")
+    except Exception as te:
+        logger.error(f"[temp_option_snapshot] truncate failed: {te}")
 
     # 5) Retention cleanup for core tables
     logger.info("Applying retention policy…")
     retention = DataRetentionManager()
     for table, date_col in (
         ('daily_stock_snapshot', 'date'),
-        ('option_contracts', 'date'),
         ('daily_option_snapshot', 'date'),
     ):
         try:

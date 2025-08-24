@@ -22,6 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.connection import db
 from database.bulk_operations import BulkStockDataLoader
 from scrapers.polygon_options_scraper_optimized import OptimizedPolygonOptionsContractsScraper
+from scrapers.polygon_option_flatfile_loader import PolygonOptionFlatFileLoader
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -255,7 +256,24 @@ class PolygonOptionSnapshotsScraper(OptimizedPolygonOptionsContractsScraper):
             'snapshots_per_second': 0
         }
         
-        # Check if we should skip this date entirely
+        # If configured, load from flat-file day aggregates instead of per-contract API calls
+        if os.getenv('OPTIONS_SNAPSHOT_SOURCE', 'api').lower() in ('flatfile', 'flat-file', 'flat'):
+            try:
+                logger.info("OPTIONS_SNAPSHOT_SOURCE=flatfile - using Polygon flat-file day aggregates")
+                ff_loader = PolygonOptionFlatFileLoader(api_key=self.api_key)
+                ff_res = ff_loader.load_for_date(target_date, skip_existing=skip_existing)
+                results['total_snapshots_inserted'] = 0  # unknown without extra query
+                total_time = time.time() - start_time
+                results['processing_time_seconds'] = round(total_time, 2)
+                if ff_res.get('success'):
+                    logger.info("✓ Flat-file load completed")
+                else:
+                    logger.error("Flat-file load failed")
+                return results
+            except Exception as e:
+                logger.error(f"Flat-file load failed, falling back to API path: {e}")
+
+        # Check if we should skip this date entirely (API path)
         if skip_existing:
             try:
                 existing_check_sql = """

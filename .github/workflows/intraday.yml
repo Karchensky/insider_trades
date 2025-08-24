@@ -1,0 +1,27 @@
+name: Intraday Pipeline
+
+on:
+  schedule:
+    # Weekdays every 5 minutes during 13:30-20:00 UTC (~9:30-16:00 ET)
+    - cron: '*/5 13-20 * * 1-5'
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run intraday schedule once
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python intraday_schedule.py --retention 1 | cat
+

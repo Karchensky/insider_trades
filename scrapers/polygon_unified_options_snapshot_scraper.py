@@ -37,6 +37,14 @@ class UnifiedOptionsSnapshotScraper:
             raise ValueError("POLYGON_API_KEY not found in environment variables")
         self.base_url = "https://api.polygon.io"
         self.session = requests.Session()
+        # Increase HTTP connection pool to support high concurrency
+        try:
+            from requests.adapters import HTTPAdapter
+            adapter = HTTPAdapter(pool_connections=100, pool_maxsize=200, max_retries=3)
+            self.session.mount('https://', adapter)
+            self.session.mount('http://', adapter)
+        except Exception:
+            pass
 
     def fetch_page(self, ticker: Optional[str], limit: int, sort: Optional[str], order: Optional[str], next_url: Optional[str]):
         if next_url:
@@ -74,20 +82,75 @@ class UnifiedOptionsSnapshotScraper:
 
     def fetch_by_tickers(self, tickers: list[str]) -> dict:
         """
-        Request unified snapshot for a comma-separated list of tickers (max 250).
-        tickers: list of option contract tickers (O:...)
+        Request unified snapshot for a comma-separated list of tickers.
+        If the request fails with a client error (e.g., URL too long or bad request),
+        recursively split the batch and merge results. This keeps the intraday run resilient.
         """
         if not tickers:
             return {'results': []}
-        url = f"{self.base_url}/v3/snapshot"
-        params = {
-            'type': 'options',
-            'ticker': ','.join(tickers),
-            'apikey': self.api_key
-        }
-        resp = self.session.get(url, params=params, timeout=60)
-        resp.raise_for_status()
-        return resp.json()
+
+        def _request(ts: list[str]) -> dict:
+            url = f"{self.base_url}/v3/snapshot"
+            # Always use ticker.any_of per official client guidance
+            params = {
+                # Omit 'type' when using ticker.any_of, let prefixes (O:, X:, C:) drive market
+                'ticker.any_of': ','.join(ts),
+                'apikey': self.api_key
+            }
+
+            # Dynamically split to respect URL length limits in the stack
+            # Default conservative limit if not provided
+            try:
+                max_url = int(os.getenv('POLYGON_MAX_URL_LEN', '1900'))
+            except Exception:
+                max_url = 1900
+            # Compute prepared URL length
+            preq = requests.PreparedRequest()
+            preq.prepare_url(url, params)
+            if len(preq.url) > max_url and len(ts) > 1:
+                mid = len(ts) // 2
+                left = _request(ts[:mid])
+                right = _request(ts[mid:])
+                merged = {'results': []}
+                if left and left.get('results'):
+                    merged['results'].extend(left['results'])
+                if right and right.get('results'):
+                    merged['results'].extend(right['results'])
+                return merged
+
+            resp = self.session.get(url, params=params, timeout=60)
+            try:
+                resp.raise_for_status()
+                data = resp.json()
+                # Deduplicate results by ticker within a single response
+                results = data.get('results') or []
+                if results:
+                    seen = set()
+                    deduped = []
+                    for r in results:
+                        tk = r.get('ticker')
+                        if not tk or tk in seen:
+                            continue
+                        seen.add(tk)
+                        deduped.append(r)
+                    data['results'] = deduped
+                return data
+            except requests.HTTPError as e:
+                status = resp.status_code if resp is not None else None
+                # Fallback: split the batch on client errors
+                if status in (400, 414) and len(ts) > 1:
+                    mid = len(ts) // 2
+                    left = _request(ts[:mid])
+                    right = _request(ts[mid:])
+                    merged = {'results': []}
+                    if left and left.get('results'):
+                        merged['results'].extend(left['results'])
+                    if right and right.get('results'):
+                        merged['results'].extend(right['results'])
+                    return merged
+                raise
+
+        return _request(tickers)
 
 
 def main():

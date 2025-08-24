@@ -11,6 +11,7 @@ The primary source for stock & option data
 * [All Contracts | Options REST API - Polygon](https://polygon.io/docs/rest/options/contracts/all-contracts)  - Used to generate a distinct list of contracts with expiration dates in a specified range. Data use: Lookup/resource.
 * [Daily Ticker Summary (OHLC) | Options REST API - Polygon](https://polygon.io/docs/rest/options/aggregates/daily-ticker-summary) - The daily ticker summary for a given options contract. Used to populate daily aggregates on options contracts. Data use: Populate historical.
 * [Option Chain Snapshot | Options REST API - Polygon](https://polygon.io/docs/rest/options/snapshots/option-chain-snapshot) - Used to get a comprehensive snapshot for all options on a given ticker, including greeks, pricing details, etc. Data use: Intraday / capturing of the current snapshot.
+* [Flat Files Quickstart | Polygon](https://polygon.io/docs/flat-files/quickstart) - Flat files for daily snapshot
 
 ### Stocks
 

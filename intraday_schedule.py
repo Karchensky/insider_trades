@@ -36,7 +36,8 @@ def run_once(include_otc: bool,
              options_limit: int,
              options_max_pages: Optional[int],
              options_batch_calls: int,
-             options_workers: int) -> None:
+             options_workers: int,
+             options_test_contracts: Optional[int] = None) -> None:
     loader = BulkStockDataLoader()
 
     # Stocks: full market snapshot (one call)
@@ -58,27 +59,63 @@ def run_once(include_otc: bool,
     try:
         opt_scraper = UnifiedOptionsSnapshotScraper()
         from database.connection import db
-        latest_date_rows = db.execute_query("SELECT MAX(date) AS d FROM option_contracts")
+        latest_date_rows = db.execute_query("SELECT MAX(date) AS d FROM daily_option_snapshot")
         latest_date = latest_date_rows[0]['d'] if latest_date_rows and latest_date_rows[0]['d'] else None
         if not latest_date:
-            logger.warning("No latest date found in option_contracts; skipping options snapshot")
+            logger.warning("No latest date found in daily_option_snapshot; skipping options snapshot")
         else:
-            count_row = db.execute_query("SELECT COUNT(*) AS c FROM option_contracts WHERE date = %s", (latest_date,))
+            count_row = db.execute_query("SELECT COUNT(DISTINCT contract_ticker) AS c FROM daily_option_snapshot WHERE date = %s", (latest_date,))
             total_contracts = count_row[0]['c'] if count_row else 0
-            page_size = 250
+            # Use CLI-provided options_limit as the per-request ticker count
+            page_size = options_limit or 250
             import math
             total_pages = math.ceil(total_contracts / page_size) if total_contracts else 0
             bulk_calls = options_batch_calls
             total_bulk_loads = math.ceil(total_pages / bulk_calls) if total_pages else 0
-            logger.info("[temp_option_snapshot] Planning: total_contracts=%d, pages(@250)=%d, bulk_loads(@%d calls)=%d", total_contracts, total_pages, bulk_calls, total_bulk_loads)
+            logger.info("[temp_option_snapshot] Planning: total_contracts=%d, pages(@%d)=%d, bulk_loads(@%d calls)=%d", total_contracts, page_size, total_pages, bulk_calls, total_bulk_loads)
 
             if total_contracts == 0:
                 return
 
-            rows = db.execute_query("SELECT contract_ticker FROM option_contracts WHERE date = %s ORDER BY contract_ticker", (latest_date,))
+            rows = db.execute_query("SELECT DISTINCT contract_ticker FROM daily_option_snapshot WHERE date = %s ORDER BY contract_ticker", (latest_date,))
             tickers: List[str] = [r['contract_ticker'] for r in rows]
-            # Build list of 250-ticker request batches
-            request_batches = [tickers[i:i+page_size] for i in range(0, len(tickers), page_size)]
+            if options_test_contracts and options_test_contracts > 0:
+                tickers = tickers[:options_test_contracts]
+            # Build URL-length-aware request batches using ticker.any_of, capped by page_size
+            import requests
+            try:
+                max_url_len = int(os.getenv('POLYGON_MAX_URL_LEN', '7500'))
+            except Exception:
+                max_url_len = 7500
+            base_url = "https://api.polygon.io/v3/snapshot"
+
+            request_batches: List[List[str]] = []
+            current: List[str] = []
+            for t in tickers:
+                candidate = current + [t]
+                if len(candidate) > page_size:
+                    if current:
+                        request_batches.append(current)
+                    current = [t]
+                    continue
+                params = {
+                    'type': 'options',
+                    'ticker.any_of': ','.join(candidate),
+                    'apikey': 'X'
+                }
+                preq = requests.PreparedRequest()
+                preq.prepare_url(base_url, params)
+                if len(preq.url) > max_url_len:
+                    if current:
+                        request_batches.append(current)
+                        current = [t]
+                    else:
+                        request_batches.append([t])
+                        current = []
+                else:
+                    current = candidate
+            if current:
+                request_batches.append(current)
 
             # Group into super-batches of N calls (e.g., 100)
             total_loaded = 0
@@ -87,6 +124,8 @@ def run_once(include_otc: bool,
                 group = request_batches[start:start+bulk_calls]
                 logger.info("[temp_option_snapshot] Fetching super-batch %d/%d (%d calls)", (start//bulk_calls)+1, total_bulk_loads, len(group))
                 combined_results = []
+                # Track which tickers were requested and returned
+                requested_in_group = set(t for batch in group for t in batch)
                 with ThreadPoolExecutor(max_workers=options_workers) as ex:
                     future_map = {ex.submit(opt_scraper.fetch_by_tickers, batch): idx for idx, batch in enumerate(group)}
                     for fut in as_completed(future_map):
@@ -97,6 +136,35 @@ def run_once(include_otc: bool,
                                 combined_results.extend(res)
                         except Exception as fe:
                             logger.error("fetch_by_tickers failed in super-batch at request %d: %s", future_map[fut], fe)
+                # Deduplicate across calls by ticker, keep latest by last_updated
+                if combined_results:
+                    by_ticker = {}
+                    for r in combined_results:
+                        tk = r.get('ticker')
+                        if not tk:
+                            continue
+                        lu = r.get('last_updated') or 0
+                        if tk not in by_ticker or (by_ticker[tk].get('last_updated') or 0) < lu:
+                            by_ticker[tk] = r
+                    combined_results = list(by_ticker.values())
+                # Compute missing tickers and attempt one retry for them
+                returned_tickers = {r.get('ticker') for r in combined_results if r.get('ticker')}
+                missing = list(requested_in_group - returned_tickers)
+                if missing:
+                    logger.info("[temp_option_snapshot] Retrying %d missing tickers in smaller batches", len(missing))
+                    # Retry in batches capped at 50 to avoid URL length and pool pressure
+                    retry_batches = [missing[i:i+50] for i in range(0, len(missing), 50)]
+                    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+                    with _TPE(max_workers=min(options_workers, 10)) as ex2:
+                        futs = {ex2.submit(opt_scraper.fetch_by_tickers, b): b for b in retry_batches}
+                        for fut in _ac(futs):
+                            try:
+                                data = fut.result()
+                                res = data.get('results') or []
+                                if res:
+                                    combined_results.extend(res)
+                            except Exception as re:
+                                logger.warning("Retry batch failed: %s", re)
                 if combined_results:
                     out = loader.bulk_upsert_temp_option_snapshot_copy({'results': combined_results})
                     if out.get('success'):
@@ -139,13 +207,16 @@ def main():
                         help='Number of concurrent API calls to combine per bulk load (default: 100)')
     parser.add_argument('--options-workers', type=int, default=int(os.getenv('INTRADAY_OPTIONS_WORKERS', '20')),
                         help='Max concurrent workers for options calls (default: 20)')
+    parser.add_argument('--options-test-contracts', type=int, default=None,
+                        help='Optional: limit total number of option contracts (for testing)')
     args = parser.parse_args()
 
     run_once(include_otc=args.include_otc,
              options_limit=args.options_limit,
              options_max_pages=args.options_max_pages,
              options_batch_calls=args.options_batch_calls,
-             options_workers=args.options_workers)
+             options_workers=args.options_workers,
+             options_test_contracts=args.options_test_contracts)
     apply_retention(retention_days=args.retention)
     if args.delay_seconds > 0:
         time.sleep(args.delay_seconds)
