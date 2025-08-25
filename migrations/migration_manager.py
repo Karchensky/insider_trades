@@ -53,23 +53,29 @@ class MigrationManager:
             
             # Allow authenticated users to read migration history
             """
-            CREATE POLICY IF NOT EXISTS "Allow read for authenticated users" ON schema_migrations
-            FOR SELECT
-            USING (auth.role() = 'authenticated');
+            DO $$ BEGIN
+                CREATE POLICY "Allow read for authenticated users" ON schema_migrations
+                FOR SELECT
+                USING (auth.role() = 'authenticated');
+            EXCEPTION WHEN duplicate_object THEN NULL; END $$;
             """,
             
             # Allow service role full access for migrations
             """
-            CREATE POLICY IF NOT EXISTS "Allow all for service role" ON schema_migrations
-            FOR ALL
-            USING (auth.jwt() ->> 'role' = 'service_role');
+            DO $$ BEGIN
+                CREATE POLICY "Allow all for service role" ON schema_migrations
+                FOR ALL
+                USING (auth.jwt() ->> 'role' = 'service_role');
+            EXCEPTION WHEN duplicate_object THEN NULL; END $$;
             """,
             
             # Allow migration system to insert/update (for systems without service role)
             """
-            CREATE POLICY IF NOT EXISTS "Allow migration operations" ON schema_migrations
-            FOR ALL
-            USING (true);
+            DO $$ BEGIN
+                CREATE POLICY "Allow migration operations" ON schema_migrations
+                FOR ALL
+                USING (true);
+            EXCEPTION WHEN duplicate_object THEN NULL; END $$;
             """
         ]
         

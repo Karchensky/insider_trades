@@ -40,10 +40,10 @@ class BulkStockDataLoader:
             'records_per_second': 0
         }
 
-    # ===== Full Market Snapshot (stocks) → temp_stock_snapshot =====
+    # ===== Full Market Snapshot (stocks) → temp_stock =====
     def prepare_temp_snapshot_data_for_copy(self, polygon_response: Dict[str, Any]) -> Tuple[StringIO, int]:
         """
-        Prepare full market snapshot data (single-call) for COPY into temp_stock_snapshot.
+        Prepare full market snapshot data (single-call) for COPY into temp_stock.
         Maps: day, lastQuote, lastTrade, and updated (as_of_timestamp), ticker.
         """
         tickers = polygon_response.get('tickers')
@@ -156,10 +156,10 @@ class BulkStockDataLoader:
                     )
                 )
 
-                logger.info("Upserting into temp_stock_snapshot…")
+                logger.info("Upserting into temp_stock…")
                 cursor.execute(
                     f"""
-                    INSERT INTO temp_stock_snapshot (
+                    INSERT INTO temp_stock (
                         as_of_timestamp, symbol,
                         day_open, day_high, day_low, day_close, day_volume, day_vwap
                     )
@@ -196,8 +196,8 @@ class BulkStockDataLoader:
             logger.error(f"Temp snapshots COPY failed: {e}")
             return {'success': False, 'error': str(e), 'records_processed': 0, 'execution_time': time.time() - start, 'records_per_second': 0}
 
-    # ===== Unified Snapshot (options) → temp_option_snapshot =====
-    def prepare_temp_option_snapshot_for_copy(self, snapshot_response: Dict[str, Any]) -> Tuple[StringIO, int]:
+    # ===== Unified Snapshot (options) → temp_option =====
+    def prepare_temp_option_for_copy(self, snapshot_response: Dict[str, Any]) -> Tuple[StringIO, int]:
         results = snapshot_response.get('results') or []
         buf = StringIO()
         rows = 0
@@ -251,10 +251,10 @@ class BulkStockDataLoader:
         buf.seek(0)
         return buf, rows
 
-    def bulk_upsert_temp_option_snapshot_copy(self, snapshot_response: Dict[str, Any]) -> Dict[str, Any]:
+    def bulk_upsert_temp_option_copy(self, snapshot_response: Dict[str, Any]) -> Dict[str, Any]:
         start = time.time()
         try:
-            csv_data, count = self.prepare_temp_option_snapshot_for_copy(snapshot_response)
+            csv_data, count = self.prepare_temp_option_for_copy(snapshot_response)
             if count == 0:
                 return {'success': True, 'records_processed': 0, 'execution_time': time.time() - start, 'records_per_second': 0}
 
@@ -321,7 +321,7 @@ class BulkStockDataLoader:
 
                 cursor.execute(
                     f"""
-                    INSERT INTO temp_option_snapshot (
+                    INSERT INTO temp_option (
                         as_of_timestamp, symbol, contract_ticker,
                         break_even_price, strike_price, implied_volatility, open_interest,
                         greeks_delta, greeks_gamma, greeks_theta, greeks_vega,
@@ -916,7 +916,7 @@ class BulkStockDataLoader:
         csv_buffer.seek(0)  # Reset buffer position
         
         conn = db.connect()
-        temp_table = f"temp_option_snapshot_import_{int(time.time())}"
+        temp_table = f"temp_option_import_{int(time.time())}"
         
         try:
             with conn.cursor() as cursor:
@@ -1088,7 +1088,7 @@ class BulkStockDataLoader:
         buffer.seek(0)
 
         conn = db.connect()
-        temp_table = f"temp_option_snapshot_import_{int(time.time())}"
+        temp_table = f"temp_option_import_{int(time.time())}"
 
         try:
             with conn.cursor() as cursor:
@@ -1258,10 +1258,13 @@ class BulkStockDataLoader:
             'records_per_second': 0
         }
 
-    def upsert_daily_option_snapshot_full_from_temp(self, target_date: str) -> Dict[str, Any]:
+    def upsert_full_daily_option_snapshot_from_temp(self, target_date: str) -> Dict[str, Any]:
         """
         For a given date, copy the last intraday snapshot per (symbol, contract_ticker)
-        from temp_option_snapshot into daily_option_snapshot_full.
+        from temp_option into full_daily_option_snapshot.
+        
+        Uses target_date as the snapshot_date (represents the trading day the data was captured for).
+        This ensures that when we run Friday morning for Thursday's data, we correctly mark it as Thursday.
         """
         start = time.time()
         conn = db.connect()
@@ -1272,10 +1275,10 @@ class BulkStockDataLoader:
                     SELECT symbol,
                            contract_ticker,
                            MAX(as_of_timestamp) AS max_ts
-                    FROM temp_option_snapshot
+                    FROM temp_option
                     GROUP BY symbol, contract_ticker
                 )
-                INSERT INTO daily_option_snapshot_full (
+                INSERT INTO full_daily_option_snapshot (
                     snapshot_date, symbol, contract_ticker, as_of_timestamp,
                     break_even_price, strike_price, implied_volatility, open_interest,
                     greeks_delta, greeks_gamma, greeks_theta, greeks_vega,
@@ -1286,7 +1289,7 @@ class BulkStockDataLoader:
                     session_previous_close, underlying_ticker, underlying_price, underlying_change_to_break_even, underlying_last_updated
                 )
                 SELECT
-                    %s AS snapshot_date,
+                    %s::date AS snapshot_date,
                     t.symbol,
                     t.contract_ticker,
                     t.as_of_timestamp,
@@ -1298,7 +1301,7 @@ class BulkStockDataLoader:
                     t.session_regular_trading_change, t.session_regular_trading_change_percent, t.session_late_trading_change, t.session_late_trading_change_percent,
                     t.session_previous_close, t.underlying_ticker, t.underlying_price, t.underlying_change_to_break_even, t.underlying_last_updated
                 FROM latest l
-                JOIN temp_option_snapshot t
+                JOIN temp_option t
                   ON t.symbol = l.symbol
                  AND t.contract_ticker = l.contract_ticker
                  AND t.as_of_timestamp = l.max_ts

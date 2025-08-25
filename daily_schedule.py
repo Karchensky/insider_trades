@@ -51,7 +51,7 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     )
     logger.info(f"[daily_stock_snapshot] inserted={stock_results['total_records_inserted']:,} dates_ok={stock_results['successful_scrapes']} skipped={stock_results['skipped_dates']}")
 
-    # 3) Populate daily_option_snapshot via flat files
+    # 3) Populate daily_option_snapshot via flat files (trading days only)
     logger.info("[daily_option_snapshot] Step 2/2: loading from flat files…")
     ff_loader = PolygonOptionFlatFileLoader()
     from datetime import datetime as _dt, timedelta as _td
@@ -60,6 +60,14 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     cur = s
     while cur <= e:
         ds = cur.strftime('%Y-%m-%d')
+        # Skip non-trading days to avoid 404/empty flat files
+        try:
+            if not stock_scraper.is_trading_day(cur):
+                logger.info(f"[daily_option_snapshot] Skipping {ds} - not a trading day")
+                cur += _td(days=1)
+                continue
+        except Exception:
+            pass
         try:
             res = ff_loader.load_for_date(ds, skip_existing=not force)
             logger.info(f"[daily_option_snapshot] {ds} loaded: success={res.get('success')}")
@@ -67,31 +75,93 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
             logger.error(f"[daily_option_snapshot] {ds} failed: {fe}")
         cur += _td(days=1)
 
-    # Copy latest temp_option_snapshot rows into daily_option_snapshot_full for the processed dates
+    # Copy latest temp_option rows into full_daily_option_snapshot for the processed dates
     from database.bulk_operations import BulkStockDataLoader as _Loader
     _l = _Loader()
     cur = s
     while cur <= e:
         ds = cur.strftime('%Y-%m-%d')
         try:
-            out = _l.upsert_daily_option_snapshot_full_from_temp(ds)
-            logger.info(f"[daily_option_snapshot_full] {ds} upserted={out['records_upserted']} in {out['execution_time']:.2f}s")
+            out = _l.upsert_full_daily_option_snapshot_from_temp(ds)
+            logger.info(f"[full_daily_option_snapshot] {ds} upserted={out['records_upserted']} in {out['execution_time']:.2f}s")
         except Exception as ce:
-            logger.error(f"[daily_option_snapshot_full] {ds} copy failed: {ce}")
+            logger.error(f"[full_daily_option_snapshot] {ds} copy failed: {ce}")
         cur += _td(days=1)
 
-    # Truncate temp_option_snapshot and temp_stock_snapshot to keep only fresh intraday going forward
+    # Capture FINAL anomaly events from temp table to permanent storage
+    logger.info("[anomaly_event_capture] Capturing final anomaly events from temp table...")
     try:
         from database.connection import db as _db
-        _db.execute_command("TRUNCATE TABLE temp_option_snapshot;")
-        logger.info("[temp_option_snapshot] truncated after daily snapshot capture")
+        
+        # First, get the latest as_of_timestamp for the processed dates to ensure we only capture final states
+        latest_timestamp_sql = """
+        SELECT MAX(as_of_timestamp) as latest_ts 
+        FROM temp_anomaly 
+        WHERE event_date BETWEEN %s AND %s
+        """
+        latest_result = _db.execute_query(latest_timestamp_sql, (s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d')))
+        latest_timestamp = latest_result[0]['latest_ts'] if latest_result and latest_result[0]['latest_ts'] else None
+        
+        if latest_timestamp:
+            # Only capture anomalies from the final run of the day (latest timestamp)
+            # This ensures we get the final state, not every intermediate update
+            capture_sql = """
+            INSERT INTO full_daily_anomaly_snapshot (event_date, symbol, direction, expiry_date, as_of_timestamp, kind, score, details)
+            SELECT DISTINCT ON (event_date, symbol, direction, expiry_date, kind)
+                event_date, symbol, direction, expiry_date, as_of_timestamp, kind, score, details
+            FROM temp_anomaly
+            WHERE event_date BETWEEN %s AND %s
+                AND DATE(as_of_timestamp) BETWEEN %s AND %s
+            ORDER BY event_date, symbol, direction, expiry_date, kind, as_of_timestamp DESC
+            ON CONFLICT (event_date, symbol, direction, expiry_date, kind)
+            DO UPDATE SET 
+                score = EXCLUDED.score,
+                details = EXCLUDED.details,
+                as_of_timestamp = EXCLUDED.as_of_timestamp,
+                updated_at = CURRENT_TIMESTAMP
+            """
+            _db.execute_command(capture_sql, (
+                s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d'),
+                s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d')
+            ))
+            
+            # Get count of captured events
+            count_sql = """
+            SELECT COUNT(*) as count 
+            FROM full_daily_anomaly_snapshot 
+            WHERE event_date BETWEEN %s AND %s
+            """
+            count_result = _db.execute_query(count_sql, (s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d')))
+            captured_count = count_result[0]['count'] if count_result else 0
+            
+            logger.info(f"[anomaly_event_capture] Captured {captured_count} final anomaly events to permanent storage")
+            
+            # Clean up temp_anomaly for processed dates (keep only current day for ongoing intraday)
+            cleanup_sql = """
+            DELETE FROM temp_anomaly 
+            WHERE event_date BETWEEN %s AND %s 
+                AND event_date < CURRENT_DATE
+            """
+            _db.execute_command(cleanup_sql, (s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d')))
+            logger.info("[anomaly_event_capture] Cleaned up processed temp anomaly events")
+        else:
+            logger.info("[anomaly_event_capture] No anomaly events found for the processed date range")
+        
+    except Exception as ae:
+        logger.error(f"[anomaly_event_capture] Failed to capture anomaly events: {ae}")
+
+    # Truncate temp_option and temp_stock to keep only fresh intraday going forward
+    try:
+        from database.connection import db as _db
+        _db.execute_command("TRUNCATE TABLE temp_option;")
+        logger.info("[temp_option] truncated after daily snapshot capture")
         try:
-            _db.execute_command("TRUNCATE TABLE temp_stock_snapshot;")
-            logger.info("[temp_stock_snapshot] truncated after daily snapshot capture")
+            _db.execute_command("TRUNCATE TABLE temp_stock;")
+            logger.info("[temp_stock] truncated after daily snapshot capture")
         except Exception as te2:
-            logger.error(f"[temp_stock_snapshot] truncate failed: {te2}")
+            logger.error(f"[temp_stock] truncate failed: {te2}")
     except Exception as te:
-        logger.error(f"[temp_option_snapshot] truncate failed: {te}")
+        logger.error(f"[temp_option] truncate failed: {te}")
 
     # 5) Retention cleanup for core tables
     logger.info("Applying retention policy…")

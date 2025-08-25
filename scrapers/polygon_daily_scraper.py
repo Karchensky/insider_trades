@@ -72,8 +72,10 @@ class PolygonDailyScraper:
         current_year = datetime.now().year
         holidays = [
             f"{current_year}-01-01",  # New Year's Day
+            f"{current_year}-06-19",  # Juneteenth
             f"{current_year}-07-04",  # Independence Day
             f"{current_year}-12-25",  # Christmas Day
+
         ]
         return holidays
     

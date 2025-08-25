@@ -71,7 +71,7 @@ def main():
         logger.error("No snapshot data to process")
         return
 
-    # Use existing high-performance COPY path that maps snapshot payload → temp_stock_snapshot
+    # Use existing high-performance COPY path that maps snapshot payload → temp_stock
     result = loader.bulk_upsert_temp_snapshots_copy(snapshot)
     if result.get('success'):
         logger.info("✓ Loaded %s records in %.2fs (%.0f rec/s)",

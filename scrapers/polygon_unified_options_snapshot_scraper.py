@@ -180,7 +180,7 @@ def main():
         if not results:
             break
 
-        out = loader.bulk_upsert_temp_option_snapshot_copy({'results': results})
+        out = loader.bulk_upsert_temp_option_copy({'results': results})
         if out.get('success'):
             logger.info("✓ Loaded %s option rows in %.2fs (%.0f rec/s)", out['records_processed'], out['execution_time'], out['records_per_second'])
             total_loaded += out['records_processed']

@@ -1,8 +1,8 @@
 """
 Intraday Snapshots Orchestrator
 
-- Runs temp_stock_snapshot (full-market stock snapshot)
-- Runs temp_option_snapshot (unified options snapshot)
+- Runs temp_stock (full-market stock snapshot)
+- Runs temp_option (unified options snapshot)
 - Applies retention for both temp tables
 
 Usage:
@@ -26,6 +26,7 @@ from scrapers.polygon_full_market_snapshot_scraper import FullMarketSnapshotScra
 from scrapers.polygon_unified_options_snapshot_scraper import UnifiedOptionsSnapshotScraper
 from database.bulk_operations import BulkStockDataLoader
 from maintenance.data_retention import DataRetentionManager
+from analysis.enhanced_anomaly_detection import run_enhanced_intraday_detection
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -72,7 +73,7 @@ def run_once(include_otc: bool,
             total_pages = math.ceil(total_contracts / page_size) if total_contracts else 0
             bulk_calls = options_batch_calls
             total_bulk_loads = math.ceil(total_pages / bulk_calls) if total_pages else 0
-            logger.info("[temp_option_snapshot] Planning: total_contracts=%d, pages(@%d)=%d, bulk_loads(@%d calls)=%d", total_contracts, page_size, total_pages, bulk_calls, total_bulk_loads)
+            logger.info("[temp_option] Planning: total_contracts=%d, pages(@%d)=%d, bulk_loads(@%d calls)=%d", total_contracts, page_size, total_pages, bulk_calls, total_bulk_loads)
 
             if total_contracts == 0:
                 return
@@ -122,7 +123,7 @@ def run_once(include_otc: bool,
             from concurrent.futures import ThreadPoolExecutor, as_completed
             for start in range(0, len(request_batches), bulk_calls):
                 group = request_batches[start:start+bulk_calls]
-                logger.info("[temp_option_snapshot] Fetching super-batch %d/%d (%d calls)", (start//bulk_calls)+1, total_bulk_loads, len(group))
+                logger.info("[temp_option] Fetching super-batch %d/%d (%d calls)", (start//bulk_calls)+1, total_bulk_loads, len(group))
                 combined_results = []
                 # Track which tickers were requested and returned
                 requested_in_group = set(t for batch in group for t in batch)
@@ -151,7 +152,7 @@ def run_once(include_otc: bool,
                 returned_tickers = {r.get('ticker') for r in combined_results if r.get('ticker')}
                 missing = list(requested_in_group - returned_tickers)
                 if missing:
-                    logger.info("[temp_option_snapshot] Retrying %d missing tickers in smaller batches", len(missing))
+                    logger.info("[temp_option] Retrying %d missing tickers in smaller batches", len(missing))
                     # Retry in batches capped at 50 to avoid URL length and pool pressure
                     retry_batches = [missing[i:i+50] for i in range(0, len(missing), 50)]
                     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
@@ -166,31 +167,39 @@ def run_once(include_otc: bool,
                             except Exception as re:
                                 logger.warning("Retry batch failed: %s", re)
                 if combined_results:
-                    out = loader.bulk_upsert_temp_option_snapshot_copy({'results': combined_results})
+                    out = loader.bulk_upsert_temp_option_copy({'results': combined_results})
                     if out.get('success'):
                         total_loaded += out['records_processed']
-                        logger.info("[temp_option_snapshot] Super-batch loaded: %s rows (total=%s)", out['records_processed'], total_loaded)
+                        logger.info("[temp_option] Super-batch loaded: %s rows (total=%s)", out['records_processed'], total_loaded)
                     else:
-                        logger.error("[temp_option_snapshot] Super-batch load failed: %s", out.get('error'))
-            logger.info("[temp_option_snapshot] Total loaded: %d rows", total_loaded)
+                        logger.error("[temp_option] Super-batch load failed: %s", out.get('error'))
+            logger.info("[temp_option] Total loaded: %d rows", total_loaded)
+            
+            # Run enhanced anomaly detection system
+            logger.info("[anomaly_detection] Starting enhanced anomaly detection...")
+            try:
+                enhanced_results = run_enhanced_intraday_detection()
+                logger.info("[anomaly_detection] Enhanced detection results: %s", enhanced_results)
+            except Exception as ee:
+                logger.error("[anomaly_detection] Enhanced detection failed: %s", ee)
     except Exception as e:
         logger.error(f"Options snapshot error: {e}")
 
 
 def apply_retention(retention_days: int) -> None:
     manager = DataRetentionManager()
-    # temp_stock_snapshot: use created_at (timestamp) for age
+    # temp_stock: use created_at (timestamp) for age
     try:
-        res = manager.delete_old_records('temp_stock_snapshot', 'created_at', retention_days, dry_run=False)
-        logger.info("Retention temp_stock_snapshot: cutoff=%s deleted=%s", res['cutoff_date'], res['records_deleted'])
+        res = manager.delete_old_records('temp_stock', 'created_at', retention_days, dry_run=False)
+        logger.info("Retention temp_stock: cutoff=%s deleted=%s", res['cutoff_date'], res['records_deleted'])
     except Exception as e:
-        logger.error(f"Retention failed for temp_stock_snapshot: {e}")
-    # temp_option_snapshot: use as_of_timestamp
+        logger.error(f"Retention failed for temp_stock: {e}")
+    # temp_option: use as_of_timestamp
     try:
-        res = manager.delete_old_records('temp_option_snapshot', 'as_of_timestamp', retention_days, dry_run=False)
-        logger.info("Retention temp_option_snapshot: cutoff=%s deleted=%s", res['cutoff_date'], res['records_deleted'])
+        res = manager.delete_old_records('temp_option', 'as_of_timestamp', retention_days, dry_run=False)
+        logger.info("Retention temp_option: cutoff=%s deleted=%s", res['cutoff_date'], res['records_deleted'])
     except Exception as e:
-        logger.error(f"Retention failed for temp_option_snapshot: {e}")
+        logger.error(f"Retention failed for temp_option: {e}")
 
 
 def main():
