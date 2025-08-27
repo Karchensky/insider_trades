@@ -61,12 +61,10 @@ python migrate.py migrate
 ### Core Tables
 
 - **`daily_stock_snapshot`**: Historical daily stock OHLC data
-- **`daily_option_snapshot`**: Historical daily option OHLC data
-- **`full_daily_option_snapshot`**: End-of-day option snapshots with Greeks
-- **`full_daily_anomaly_snapshot`**: Historical anomaly events
+- **`daily_option_snapshot`**: Historical daily option OHLC data with analytics (implied volatility, Greeks, open interest)
 - **`temp_stock`**: Intraday stock snapshots (15-min delayed)
 - **`temp_option`**: Intraday option snapshots with Greeks and volumes
-- **`temp_anomaly`**: Real-time anomaly detection results
+- **`temp_anomaly`**: Real-time anomaly detection results (retained for ongoing analysis)
 
 ## Operational Workflows
 
@@ -83,7 +81,8 @@ python intraday_schedule.py --retention 1 --options-limit 250
 3. Runs enhanced anomaly detection across 5 algorithms
 4. Stores results in `temp_anomaly` with upsert capability
 5. Sends email alerts for high-score anomalies (≥7.0)
-6. Applies retention policy to all temp tables (keeps 1 business day)
+6. Applies retention policy to temp_stock and temp_option (keeps 1 business day)
+7. Keeps temp_anomaly data for ongoing analysis (cleans up data older than 7 days)
 
 ### Daily Process (Next Business Day, 8AM ET)
 
@@ -95,9 +94,9 @@ python daily_schedule.py --recent 3 --retention 60
 
 1. Processes historical stock data → `daily_stock_snapshot`
 2. Processes historical option data → `daily_option_snapshot`
-3. Captures final intraday snapshots → `full_daily_option_snapshot`
-4. Migrates final anomaly events → `temp_anomaly` to `full_daily_anomaly_snapshot`
-5. Truncates temp tables for fresh start
+3. Updates analytics columns in `daily_option_snapshot` with latest temp data (implied volatility, Greeks, open interest)
+4. Keeps temp_anomaly data for ongoing analysis (no longer migrated to removed full table)
+5. Truncates temp_stock and temp_option for fresh start (temp_anomaly preserved)
 6. Applies retention policies (60 business days default)
 
 ## Enhanced Anomaly Detection

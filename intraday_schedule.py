@@ -200,6 +200,18 @@ def apply_retention(retention_days: int) -> None:
         logger.info("Retention temp_option: cutoff=%s deleted=%s", res['cutoff_date'], res['records_deleted'])
     except Exception as e:
         logger.error(f"Retention failed for temp_option: {e}")
+    # Note: temp_anomaly is NOT truncated to preserve ongoing anomaly analysis
+    # Only cleanup very old data (7+ days) to maintain performance
+    try:
+        cleanup_sql = """
+        DELETE FROM temp_anomaly 
+        WHERE event_date < CURRENT_DATE - INTERVAL '7 days'
+        """
+        from database.connection import db
+        result = db.execute_command(cleanup_sql)
+        logger.info("Retention temp_anomaly: cleaned up data older than 7 days")
+    except Exception as e:
+        logger.error(f"Retention failed for temp_anomaly: {e}")
 
 
 def main():

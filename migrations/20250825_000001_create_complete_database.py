@@ -87,8 +87,6 @@ def up():
                     low_price DECIMAL(12, 4),
                     close_price DECIMAL(12, 4),
                     volume BIGINT DEFAULT 0,
-                    pre_market_price DECIMAL(12, 4),
-                    after_hours_price DECIMAL(12, 4),
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     

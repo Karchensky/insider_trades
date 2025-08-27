@@ -75,82 +75,38 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
             logger.error(f"[daily_option_snapshot] {ds} failed: {fe}")
         cur += _td(days=1)
 
-    # Copy latest temp_option rows into full_daily_option_snapshot for the processed dates
+    # Update daily_option_snapshot with latest analytics data from temp_option for the processed dates
+    logger.info("[daily_option_snapshot] Updating analytics columns with latest temp data...")
     from database.bulk_operations import BulkStockDataLoader as _Loader
     _l = _Loader()
     cur = s
     while cur <= e:
         ds = cur.strftime('%Y-%m-%d')
         try:
-            out = _l.upsert_full_daily_option_snapshot_from_temp(ds)
-            logger.info(f"[full_daily_option_snapshot] {ds} upserted={out['records_upserted']} in {out['execution_time']:.2f}s")
+            out = _l.update_daily_option_snapshot_analytics_from_temp(ds)
+            logger.info(f"[daily_option_snapshot] {ds} updated={out['records_updated']} records with latest analytics in {out['execution_time']:.2f}s")
         except Exception as ce:
-            logger.error(f"[full_daily_option_snapshot] {ds} copy failed: {ce}")
+            logger.error(f"[daily_option_snapshot] {ds} analytics update failed: {ce}")
         cur += _td(days=1)
 
-    # Capture FINAL anomaly events from temp table to permanent storage
-    logger.info("[anomaly_event_capture] Capturing final anomaly events from temp table...")
+    # Note: Anomaly events are now kept in temp_anomaly table for ongoing analysis
+    # The full_daily_anomaly_snapshot table has been removed as part of schema restructuring
+    logger.info("[anomaly_retention] Keeping temp_anomaly data for ongoing analysis (full table removed)")
+    
+    # Clean up old temp_anomaly data (keep only current day and recent data for ongoing intraday)
     try:
         from database.connection import db as _db
-        
-        # First, get the latest as_of_timestamp for the processed dates to ensure we only capture final states
-        latest_timestamp_sql = """
-        SELECT MAX(as_of_timestamp) as latest_ts 
-        FROM temp_anomaly 
-        WHERE event_date BETWEEN %s AND %s
+        cleanup_sql = """
+        DELETE FROM temp_anomaly 
+        WHERE event_date < CURRENT_DATE - INTERVAL '7 days'
         """
-        latest_result = _db.execute_query(latest_timestamp_sql, (s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d')))
-        latest_timestamp = latest_result[0]['latest_ts'] if latest_result and latest_result[0]['latest_ts'] else None
-        
-        if latest_timestamp:
-            # Only capture anomalies from the final run of the day (latest timestamp)
-            # This ensures we get the final state, not every intermediate update
-            capture_sql = """
-            INSERT INTO full_daily_anomaly_snapshot (event_date, symbol, direction, expiry_date, as_of_timestamp, kind, score, details)
-            SELECT DISTINCT ON (event_date, symbol, direction, expiry_date, kind)
-                event_date, symbol, direction, expiry_date, as_of_timestamp, kind, score, details
-            FROM temp_anomaly
-            WHERE event_date BETWEEN %s AND %s
-                AND DATE(as_of_timestamp) BETWEEN %s AND %s
-            ORDER BY event_date, symbol, direction, expiry_date, kind, as_of_timestamp DESC
-            ON CONFLICT (event_date, symbol, direction, expiry_date, kind)
-            DO UPDATE SET 
-                score = EXCLUDED.score,
-                details = EXCLUDED.details,
-                as_of_timestamp = EXCLUDED.as_of_timestamp,
-                updated_at = CURRENT_TIMESTAMP
-            """
-            _db.execute_command(capture_sql, (
-                s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d'),
-                s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d')
-            ))
-            
-            # Get count of captured events
-            count_sql = """
-            SELECT COUNT(*) as count 
-            FROM full_daily_anomaly_snapshot 
-            WHERE event_date BETWEEN %s AND %s
-            """
-            count_result = _db.execute_query(count_sql, (s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d')))
-            captured_count = count_result[0]['count'] if count_result else 0
-            
-            logger.info(f"[anomaly_event_capture] Captured {captured_count} final anomaly events to permanent storage")
-            
-            # Clean up temp_anomaly for processed dates (keep only current day for ongoing intraday)
-            cleanup_sql = """
-            DELETE FROM temp_anomaly 
-            WHERE event_date BETWEEN %s AND %s 
-                AND event_date < CURRENT_DATE
-            """
-            _db.execute_command(cleanup_sql, (s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d')))
-            logger.info("[anomaly_event_capture] Cleaned up processed temp anomaly events")
-        else:
-            logger.info("[anomaly_event_capture] No anomaly events found for the processed date range")
-        
+        result = _db.execute_command(cleanup_sql)
+        logger.info("[anomaly_retention] Cleaned up old temp_anomaly data (keeping recent 7 days)")
     except Exception as ae:
-        logger.error(f"[anomaly_event_capture] Failed to capture anomaly events: {ae}")
+        logger.error(f"[anomaly_retention] Failed to cleanup old anomaly data: {ae}")
 
     # Truncate temp_option and temp_stock to keep only fresh intraday going forward
+    # Note: temp_anomaly is NOT truncated to preserve ongoing anomaly analysis
     try:
         from database.connection import db as _db
         _db.execute_command("TRUNCATE TABLE temp_option;")

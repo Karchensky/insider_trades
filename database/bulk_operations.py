@@ -894,15 +894,13 @@ class BulkStockDataLoader:
                 low_price = float(snapshot.get('low', 0)) if snapshot.get('low') is not None else None
                 close_price = float(snapshot.get('close', 0)) if snapshot.get('close') is not None else None
                 volume = int(snapshot.get('volume', 0)) if snapshot.get('volume') is not None else 0
-                pre_market_price = float(snapshot.get('preMarket', 0)) if snapshot.get('preMarket') is not None else None
-                after_hours_price = float(snapshot.get('afterHours', 0)) if snapshot.get('afterHours') is not None else None
                 
                 # Handle None values for COPY (use \N for NULL)
                 def format_value(val):
                     return str(val) if val is not None else '\\N'
                 
                 # Write CSV row (tab-separated for better performance)
-                csv_buffer.write(f"{date_val}\t{symbol}\t{contract_ticker}\t{format_value(open_price)}\t{format_value(high_price)}\t{format_value(low_price)}\t{format_value(close_price)}\t{volume}\t{format_value(pre_market_price)}\t{format_value(after_hours_price)}\n")
+                csv_buffer.write(f"{date_val}\t{symbol}\t{contract_ticker}\t{format_value(open_price)}\t{format_value(high_price)}\t{format_value(low_price)}\t{format_value(close_price)}\t{volume}\n")
                 valid_records += 1
                 
             except (KeyError, ValueError, TypeError) as e:
@@ -930,9 +928,7 @@ class BulkStockDataLoader:
                         high_price DECIMAL(12, 4),
                         low_price DECIMAL(12, 4),
                         close_price DECIMAL(12, 4),
-                        volume BIGINT,
-                        pre_market_price DECIMAL(12, 4),
-                        after_hours_price DECIMAL(12, 4)
+                        volume BIGINT
                     );
                 """)
                 
@@ -944,8 +940,7 @@ class BulkStockDataLoader:
                     sep='\t',
                     null='\\N',
                     columns=('date', 'symbol', 'contract_ticker', 'open_price', 'high_price', 
-                            'low_price', 'close_price', 'volume', 'pre_market_price', 
-                            'after_hours_price')
+                            'low_price', 'close_price', 'volume')
                 )
                 
                 # Perform bulk upsert from temporary table
@@ -953,9 +948,9 @@ class BulkStockDataLoader:
                 cursor.execute(f"""
                     INSERT INTO daily_option_snapshot 
                     (date, symbol, contract_ticker, open_price, high_price, low_price, 
-                     close_price, volume, pre_market_price, after_hours_price)
+                     close_price, volume)
                     SELECT date, symbol, contract_ticker, open_price, high_price, low_price,
-                           close_price, volume, pre_market_price, after_hours_price
+                           close_price, volume
                     FROM {temp_table}
                     ON CONFLICT (date, symbol, contract_ticker) 
                     DO UPDATE SET
@@ -964,8 +959,6 @@ class BulkStockDataLoader:
                         low_price = EXCLUDED.low_price,
                         close_price = EXCLUDED.close_price,
                         volume = EXCLUDED.volume,
-                        pre_market_price = EXCLUDED.pre_market_price,
-                        after_hours_price = EXCLUDED.after_hours_price,
                         updated_at = CURRENT_TIMESTAMP;
                 """)
                 
@@ -1066,16 +1059,12 @@ class BulkStockDataLoader:
                 close_price = f_num(r.get('close'))
                 volume = f_int(r.get('volume'))
 
-                # pre/after not present in flat files
-                pre_market_price = None
-                after_hours_price = None
-
                 def fmt(val: Optional[float]) -> str:
                     return str(val) if val is not None else '\\N'
 
                 # Write one TSV line for COPY
                 buffer.write(
-                    f"{date_val}\t{symbol}\t{contract_ticker}\t{fmt(open_price)}\t{fmt(high_price)}\t{fmt(low_price)}\t{fmt(close_price)}\t{volume}\t{fmt(pre_market_price)}\t{fmt(after_hours_price)}\n"
+                    f"{date_val}\t{symbol}\t{contract_ticker}\t{fmt(open_price)}\t{fmt(high_price)}\t{fmt(low_price)}\t{fmt(close_price)}\t{volume}\n"
                 )
                 valid_records += 1
             except Exception:
@@ -1102,9 +1091,7 @@ class BulkStockDataLoader:
                         high_price DECIMAL(12, 4),
                         low_price DECIMAL(12, 4),
                         close_price DECIMAL(12, 4),
-                        volume BIGINT,
-                        pre_market_price DECIMAL(12, 4),
-                        after_hours_price DECIMAL(12, 4)
+                        volume BIGINT
                     );
                     """
                 )
@@ -1116,7 +1103,7 @@ class BulkStockDataLoader:
                     null='\\N',
                     columns=(
                         'date', 'symbol', 'contract_ticker', 'open_price', 'high_price',
-                        'low_price', 'close_price', 'volume', 'pre_market_price', 'after_hours_price'
+                        'low_price', 'close_price', 'volume'
                     )
                 )
 
@@ -1124,9 +1111,9 @@ class BulkStockDataLoader:
                     f"""
                     INSERT INTO daily_option_snapshot 
                     (date, symbol, contract_ticker, open_price, high_price, low_price, 
-                     close_price, volume, pre_market_price, after_hours_price)
+                     close_price, volume)
                     SELECT date, symbol, contract_ticker, open_price, high_price, low_price,
-                           close_price, volume, pre_market_price, after_hours_price
+                           close_price, volume
                     FROM {temp_table}
                     ON CONFLICT (date, symbol, contract_ticker) 
                     DO UPDATE SET
@@ -1135,8 +1122,6 @@ class BulkStockDataLoader:
                         low_price = EXCLUDED.low_price,
                         close_price = EXCLUDED.close_price,
                         volume = EXCLUDED.volume,
-                        pre_market_price = EXCLUDED.pre_market_price,
-                        after_hours_price = EXCLUDED.after_hours_price,
                         updated_at = CURRENT_TIMESTAMP;
                     """
                 )
@@ -1258,96 +1243,54 @@ class BulkStockDataLoader:
             'records_per_second': 0
         }
 
-    def upsert_full_daily_option_snapshot_from_temp(self, target_date: str) -> Dict[str, Any]:
+    def update_daily_option_snapshot_analytics_from_temp(self, target_date: str) -> Dict[str, Any]:
         """
-        For a given date, copy the last intraday snapshot per (symbol, contract_ticker)
-        from temp_option into full_daily_option_snapshot.
+        For a given date, update the analytics columns in daily_option_snapshot
+        with the latest data from temp_option.
         
-        Uses target_date as the snapshot_date (represents the trading day the data was captured for).
-        This ensures that when we run Friday morning for Thursday's data, we correctly mark it as Thursday.
+        This replaces the previous approach of copying to full_daily_option_snapshot.
+        Now we directly update the implied_volatility, open_interest, and Greeks columns
+        in the daily_option_snapshot table.
         """
         start = time.time()
         conn = db.connect()
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                WITH latest AS (
-                    SELECT symbol,
-                           contract_ticker,
-                           MAX(as_of_timestamp) AS max_ts
-                    FROM temp_option
-                    GROUP BY symbol, contract_ticker
-                )
-                INSERT INTO full_daily_option_snapshot (
-                    snapshot_date, symbol, contract_ticker, as_of_timestamp,
-                    break_even_price, strike_price, implied_volatility, open_interest,
-                    greeks_delta, greeks_gamma, greeks_theta, greeks_vega,
-                    contract_type, exercise_style, expiration_date, shares_per_contract,
-                    session_open, session_high, session_low, session_close, session_volume,
-                    session_change, session_change_percent, session_early_trading_change, session_early_trading_change_percent,
-                    session_regular_trading_change, session_regular_trading_change_percent, session_late_trading_change, session_late_trading_change_percent,
-                    session_previous_close, underlying_ticker, underlying_price, underlying_change_to_break_even, underlying_last_updated
-                )
-                SELECT
-                    %s::date AS snapshot_date,
-                    t.symbol,
-                    t.contract_ticker,
-                    t.as_of_timestamp,
-                    t.break_even_price, t.strike_price, t.implied_volatility, t.open_interest,
-                    t.greeks_delta, t.greeks_gamma, t.greeks_theta, t.greeks_vega,
-                    t.contract_type, t.exercise_style, t.expiration_date, t.shares_per_contract,
-                    t.session_open, t.session_high, t.session_low, t.session_close, t.session_volume,
-                    t.session_change, t.session_change_percent, t.session_early_trading_change, t.session_early_trading_change_percent,
-                    t.session_regular_trading_change, t.session_regular_trading_change_percent, t.session_late_trading_change, t.session_late_trading_change_percent,
-                    t.session_previous_close, t.underlying_ticker, t.underlying_price, t.underlying_change_to_break_even, t.underlying_last_updated
-                FROM latest l
-                JOIN temp_option t
-                  ON t.symbol = l.symbol
-                 AND t.contract_ticker = l.contract_ticker
-                 AND t.as_of_timestamp = l.max_ts
-                ON CONFLICT (snapshot_date, symbol, contract_ticker)
-                DO UPDATE SET
-                    as_of_timestamp = EXCLUDED.as_of_timestamp,
-                    break_even_price = EXCLUDED.break_even_price,
-                    strike_price = EXCLUDED.strike_price,
-                    implied_volatility = EXCLUDED.implied_volatility,
-                    open_interest = EXCLUDED.open_interest,
-                    greeks_delta = EXCLUDED.greeks_delta,
-                    greeks_gamma = EXCLUDED.greeks_gamma,
-                    greeks_theta = EXCLUDED.greeks_theta,
-                    greeks_vega = EXCLUDED.greeks_vega,
-                    contract_type = EXCLUDED.contract_type,
-                    exercise_style = EXCLUDED.exercise_style,
-                    expiration_date = EXCLUDED.expiration_date,
-                    shares_per_contract = EXCLUDED.shares_per_contract,
-                    session_open = EXCLUDED.session_open,
-                    session_high = EXCLUDED.session_high,
-                    session_low = EXCLUDED.session_low,
-                    session_close = EXCLUDED.session_close,
-                    session_volume = EXCLUDED.session_volume,
-                    session_change = EXCLUDED.session_change,
-                    session_change_percent = EXCLUDED.session_change_percent,
-                    session_early_trading_change = EXCLUDED.session_early_trading_change,
-                    session_early_trading_change_percent = EXCLUDED.session_early_trading_change_percent,
-                    session_regular_trading_change = EXCLUDED.session_regular_trading_change,
-                    session_regular_trading_change_percent = EXCLUDED.session_regular_trading_change_percent,
-                    session_late_trading_change = EXCLUDED.session_late_trading_change,
-                    session_late_trading_change_percent = EXCLUDED.session_late_trading_change_percent,
-                    session_previous_close = EXCLUDED.session_previous_close,
-                    underlying_ticker = EXCLUDED.underlying_ticker,
-                    underlying_price = EXCLUDED.underlying_price,
-                    underlying_change_to_break_even = EXCLUDED.underlying_change_to_break_even,
-                    underlying_last_updated = EXCLUDED.underlying_last_updated,
+                UPDATE daily_option_snapshot dos
+                SET 
+                    implied_volatility = temp.implied_volatility,
+                    open_interest = temp.open_interest,
+                    greeks_delta = temp.greeks_delta,
+                    greeks_gamma = temp.greeks_gamma,
+                    greeks_theta = temp.greeks_theta,
+                    greeks_vega = temp.greeks_vega,
                     updated_at = CURRENT_TIMESTAMP
-                ;
+                FROM (
+                    SELECT DISTINCT ON (symbol, contract_ticker)
+                        symbol,
+                        contract_ticker,
+                        implied_volatility,
+                        open_interest,
+                        greeks_delta,
+                        greeks_gamma,
+                        greeks_theta,
+                        greeks_vega
+                    FROM temp_option
+                    WHERE DATE(as_of_timestamp) = %s
+                    ORDER BY symbol, contract_ticker, as_of_timestamp DESC
+                ) temp
+                WHERE dos.date = %s
+                  AND dos.symbol = temp.symbol
+                  AND dos.contract_ticker = temp.contract_ticker;
                 """,
-                (target_date,)
+                (target_date, target_date)
             )
             affected = cursor.rowcount or 0
             conn.commit()
         return {
             'success': True,
-            'records_upserted': affected,
+            'records_updated': affected,
             'execution_time': time.time() - start
         }
 

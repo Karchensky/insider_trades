@@ -30,7 +30,6 @@ jobs:
     env:
       INTRADAY_RETENTION_DAYS: ${{ github.event.inputs.retention || '1' }}
       INTRADAY_OPTIONS_LIMIT: ${{ github.event.inputs.options_limit || '250' }}
-      INTRADAY_OPTIONS_MAX_PAGES: ${{ github.event.inputs.options_max_pages || '4' }}
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
 
