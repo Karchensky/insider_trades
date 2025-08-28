@@ -83,15 +83,15 @@ def load_contract_history(contract_ticker: str, days: int = 30, dsn: str | None 
 
 
 def load_symbol_type_series(symbol: str, start_date: str, end_date: str, dsn: str | None = None):
-    """Time series by contract_type using full_daily_option_snapshot."""
+    """Time series by contract_type using daily_option_snapshot."""
     with get_conn(dsn).cursor() as cur:
         cur.execute(
             """
-            SELECT snapshot_date AS date, contract_type, SUM(session_volume)::bigint AS vol
-            FROM full_daily_option_snapshot
-            WHERE symbol = %s AND snapshot_date BETWEEN %s AND %s
-            GROUP BY snapshot_date, contract_type
-            ORDER BY snapshot_date
+            SELECT date AS date, contract_type, SUM(session_volume)::bigint AS vol
+            FROM daily_option_snapshot
+            WHERE symbol = %s AND date BETWEEN %s AND %s
+            GROUP BY date, contract_type
+            ORDER BY date
             """,
             (symbol, start_date, end_date)
         )
@@ -104,7 +104,7 @@ def load_symbol_type_series(symbol: str, start_date: str, end_date: str, dsn: st
 
 
 def load_symbol_heatmap(symbol: str, day: str, dsn: str | None = None, put_calls: str = 'both'):
-    """Heatmap data by expiration_date x strike using full_daily_option_snapshot."""
+    """Heatmap data by expiration_date x strike using daily_option_snapshot."""
     q_extra = ""
     if put_calls == 'calls':
         q_extra = " AND contract_type = 'call'"
@@ -114,8 +114,8 @@ def load_symbol_heatmap(symbol: str, day: str, dsn: str | None = None, put_calls
         cur.execute(
             f"""
             SELECT expiration_date, strike_price::float AS strike, SUM(session_volume)::bigint AS vol
-            FROM full_daily_option_snapshot
-            WHERE symbol = %s AND snapshot_date = %s{q_extra}
+            FROM daily_option_snapshot
+            WHERE symbol = %s AND date = %s{q_extra}
             GROUP BY expiration_date, strike
             """,
             (symbol, day)

@@ -255,12 +255,12 @@ class EnhancedAnomalyDetector:
             SELECT 
                 contract_ticker,
                 open_interest AS prev_oi,
-                snapshot_date
-            FROM full_daily_option_snapshot
-            WHERE snapshot_date = (
-                SELECT MAX(snapshot_date) 
-                FROM full_daily_option_snapshot 
-                WHERE snapshot_date < CURRENT_DATE
+                date
+            FROM daily_option_snapshot
+            WHERE date = (
+                SELECT MAX(date) 
+                FROM daily_option_snapshot 
+                WHERE date < CURRENT_DATE
             )
         )
         SELECT 

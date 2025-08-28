@@ -1248,8 +1248,7 @@ class BulkStockDataLoader:
         For a given date, update the analytics columns in daily_option_snapshot
         with the latest data from temp_option.
         
-        This replaces the previous approach of copying to full_daily_option_snapshot.
-        Now we directly update the implied_volatility, open_interest, and Greeks columns
+        Directly update the implied_volatility, open_interest, and Greeks columns
         in the daily_option_snapshot table.
         """
         start = time.time()
