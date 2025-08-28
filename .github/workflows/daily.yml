@@ -31,7 +31,7 @@ jobs:
 
       - name: Run migrations
         run: |
-          python migrate.py migrate
+          python migrations/migration_manager.py migrate
 
       - name: Run daily process
         run: |
