@@ -1,27 +1,38 @@
-name: Intraday Pipeline
+name: Intraday Process
 
 on:
   schedule:
-    # Weekdays every 5 minutes during 13:30-20:00 UTC (~9:30-16:00 ET)
-    - cron: '*/5 13-20 * * 1-5'
+    # Every 15 minutes from 9:45 AM to 4:45 PM EST (14:45-21:45 UTC)
+    # 15 minutes after market open/close due to API delay
+    - cron: '*/15 14-21 * * 1-5'
   workflow_dispatch: {}
 
 jobs:
-  run:
+  run-intraday:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Run intraday schedule once
-        env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-        run: |
-          python intraday_schedule.py --retention 1 | cat
 
+      - name: Run migrations
+        run: |
+          python migrate.py migrate
+
+      - name: Run intraday process
+        run: |
+          python intraday_schedule.py --retention 1 --options-limit 250
