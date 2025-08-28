@@ -29,10 +29,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run migrations
-        run: |
-          python migrations/migration_manager.py migrate
-
       - name: Run intraday process
         run: |
           python intraday_schedule.py --retention 1 --options-limit 250

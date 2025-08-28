@@ -29,10 +29,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run migrations
-        run: |
-          python migrations/migration_manager.py migrate
-
       - name: Run daily process
         run: |
           python daily_schedule.py --recent 30 --retention 30 | cat
