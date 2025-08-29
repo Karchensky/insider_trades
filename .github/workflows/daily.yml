@@ -3,7 +3,7 @@ name: Daily Process
 on:
   schedule:
     # 8:00 AM EST (13:00 UTC) on weekdays - day after business days
-    - cron: '0 13 * * 1-5'
+    - cron: '0 12 * * 2-6'
   workflow_dispatch: {}
 
 jobs:
@@ -15,7 +15,7 @@ jobs:
       POLYGON_S3_ACCESS_KEY: ${{ secrets.POLYGON_S3_ACCESS_KEY }}
       POLYGON_S3_SECRET_KEY: ${{ secrets.POLYGON_S3_SECRET_KEY }}
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-      
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
