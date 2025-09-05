@@ -23,15 +23,30 @@ def get_current_anomalies() -> pd.DataFrame:
         query = """
             SELECT 
                 symbol,
-                score,
-                anomaly_types,
-                details,
+                total_score as score,
+                volume_score,
+                otm_score,
+                directional_score,
+                time_score,
+                call_volume,
+                put_volume,
+                total_volume,
+                call_baseline_avg,
+                put_baseline_avg,
+                call_multiplier,
+                put_multiplier,
+                direction,
+                pattern_description,
+                z_score,
+                otm_call_percentage,
+                short_term_percentage,
+                call_put_ratio,
                 as_of_timestamp,
                 event_date
             FROM temp_anomaly
             WHERE event_date >= CURRENT_DATE - INTERVAL '7 days'
-              AND score >= 7.0
-            ORDER BY score DESC, as_of_timestamp DESC
+              AND total_score >= 7.0
+            ORDER BY total_score DESC, as_of_timestamp DESC
         """
         
         df = pd.read_sql_query(query, conn)
@@ -46,9 +61,9 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
     """Get historical data for a specific symbol."""
     conn = db.connect()
     try:
-        # Get stock price history
+        # Get stock price history (note: daily_stock_snapshot has trading_volume, not volume)
         stock_query = """
-            SELECT date, open, high, low, close, volume
+            SELECT date, open, high, low, close, trading_volume as volume
             FROM daily_stock_snapshot
             WHERE symbol = %s
               AND date >= CURRENT_DATE - INTERVAL '%s days'
@@ -143,31 +158,32 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
     # Process the data for display
     display_data = []
     for _, row in anomalies_df.iterrows():
-        details = row['details'] if isinstance(row['details'], dict) else {}
-        
-        # Extract key metrics
-        call_volume = details.get('call_volume', 0)
-        put_volume = details.get('put_volume', 0)
-        total_volume = call_volume + put_volume
-        call_baseline = details.get('call_baseline_avg', 1)
+        # Extract key metrics directly from new table structure
+        call_volume = row.get('call_volume', 0)
+        put_volume = row.get('put_volume', 0)
+        total_volume = row.get('total_volume', call_volume + put_volume)
+        call_baseline = row.get('call_baseline_avg', 1)
+        call_multiplier = row.get('call_multiplier', 0)
         
         # Calculate indicators
-        call_multiplier = call_volume / call_baseline if call_baseline > 0 else 0
         call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
-        otm_score = details.get('otm_call_score', 0)
+        otm_score = row.get('otm_score', 0)
         
-        # Determine pattern
-        if call_percentage >= 80:
-            pattern = "Strong bullish insider activity"
-        elif call_percentage <= 20:
-            pattern = "Strong bearish insider activity"
-        else:
-            pattern = "Mixed directional positioning"
+        # Use pattern description from database or generate one
+        pattern = row.get('pattern_description', 'Unusual trading pattern')
+        if not pattern or pattern == 'Unusual trading pattern':
+            if call_percentage >= 80:
+                pattern = "Strong bullish insider activity"
+            elif call_percentage <= 20:
+                pattern = "Strong bearish insider activity"
+            else:
+                pattern = "Mixed directional positioning"
         
-        # Format key indicators
+        # Format key indicators using new data structure
         key_indicators = f"""• {call_multiplier:.1f}x normal call volume
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
-• OTM Score: {otm_score:.1f}/3.0"""
+• OTM Score: {otm_score:.1f}/3.0
+• Z-Score: {row.get('z_score', 0):.1f}"""
         
         display_data.append({
             'Symbol': row['symbol'],

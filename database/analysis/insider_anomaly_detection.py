@@ -347,6 +347,43 @@ class InsiderAnomalyDetector:
             directional_score = self._calculate_directional_bias_score_v2(call_volume, put_volume, total_volume)
             time_pressure_score = self._calculate_time_pressure_score_v2(contracts)
             
+            # Calculate additional metrics for enhanced storage
+            call_baseline_avg = call_baseline.get('avg_daily_volume', 0)
+            put_baseline_avg = put_baseline.get('avg_daily_volume', 0)
+            
+            # Calculate z-scores for pattern analysis
+            call_std = call_baseline.get('stddev_daily_volume', 1)
+            put_std = put_baseline.get('stddev_daily_volume', 1)
+            call_z_score = abs(call_volume - call_baseline_avg) / call_std if call_std > 0 else 0
+            put_z_score = abs(put_volume - put_baseline_avg) / put_std if put_std > 0 else 0
+            max_z_score = max(call_z_score, put_z_score)
+            
+            # Calculate OTM and short-term percentages
+            call_contracts = [c for c in contracts if c['contract_type'] == 'call']
+            total_call_volume = sum(c['session_volume'] for c in call_contracts)
+            
+            otm_call_volume = 0
+            short_term_volume = 0
+            today = date.today()
+            
+            for contract in contracts:
+                volume = contract['session_volume']
+                
+                # Check if OTM call (strike > current price * 1.05)
+                if (contract['contract_type'] == 'call' and 
+                    float(contract.get('strike_price', 0)) > float(contract.get('underlying_price', 0)) * 1.05):
+                    otm_call_volume += volume
+                
+                # Check if short-term (<=21 days)
+                exp_date = contract.get('expiration_date')
+                if isinstance(exp_date, str):
+                    exp_date = datetime.strptime(exp_date, '%Y-%m-%d').date()
+                if exp_date and (exp_date - today).days <= 21:
+                    short_term_volume += volume
+            
+            otm_call_percentage = (otm_call_volume / total_call_volume * 100) if total_call_volume > 0 else 0
+            short_term_percentage = (short_term_volume / total_volume * 100) if total_volume > 0 else 0
+            
             # Composite score (0-10 scale)
             composite_score = min(volume_score + otm_score + directional_score + time_pressure_score, 10.0)
             
@@ -359,14 +396,17 @@ class InsiderAnomalyDetector:
                     'total_anomalies': 1,
                     'details': {
                         'volume_score': round(volume_score, 1),
-                        'otm_call_score': round(otm_score, 1),
+                        'otm_score': round(otm_score, 1),
                         'directional_score': round(directional_score, 1),
-                        'time_pressure_score': round(time_pressure_score, 1),
+                        'time_score': round(time_pressure_score, 1),
                         'call_volume': call_volume,
                         'put_volume': put_volume,
                         'total_volume': total_volume,
-                        'call_baseline_avg': call_baseline.get('avg_daily_volume', 0),
-                        'put_baseline_avg': put_baseline.get('avg_daily_volume', 0)
+                        'call_baseline_avg': call_baseline_avg,
+                        'put_baseline_avg': put_baseline_avg,
+                        'z_score': round(max_z_score, 2),
+                        'otm_call_percentage': round(otm_call_percentage, 1),
+                        'short_term_percentage': round(short_term_percentage, 1)
                     },
                     'max_individual_score': composite_score
                 }
@@ -427,7 +467,7 @@ class InsiderAnomalyDetector:
             total_call_volume += volume
             
             # OTM calls (strike > underlying * 1.05)
-            if strike > underlying_price * 1.05:
+            if float(strike) > float(underlying_price) * 1.05:
                 otm_call_volume += volume
                 
                 # Short-term OTM calls (highest conviction)
@@ -501,7 +541,7 @@ class InsiderAnomalyDetector:
         return min(score, 2.0)
 
     def _store_anomalies(self, anomalies: Dict[str, Dict]) -> int:
-        """Store detected anomalies in the temp_anomaly table."""
+        """Store detected anomalies in the enhanced temp_anomaly table."""
         if not anomalies:
             return 0
         
@@ -511,13 +551,25 @@ class InsiderAnomalyDetector:
                 stored_count = 0
                 
                 for symbol, data in anomalies.items():
-                    # Calculate actual direction based on call/put ratio
-                    call_volume = data['details'].get('call_volume', 0)
-                    put_volume = data['details'].get('put_volume', 0) 
+                    details = data['details']
+                    
+                    # Extract volume data
+                    call_volume = details.get('call_volume', 0)
+                    put_volume = details.get('put_volume', 0)
                     total_volume = call_volume + put_volume
                     
+                    # Extract baseline data
+                    call_baseline_avg = details.get('call_baseline_avg', 0)
+                    put_baseline_avg = details.get('put_baseline_avg', 0)
+                    
+                    # Calculate multipliers
+                    call_multiplier = call_volume / call_baseline_avg if call_baseline_avg > 0 else 0
+                    put_multiplier = put_volume / put_baseline_avg if put_baseline_avg > 0 else 0
+                    
+                    # Calculate direction and ratios
                     if total_volume > 0:
                         call_ratio = call_volume / total_volume
+                        call_put_ratio = call_volume / put_volume if put_volume > 0 else float('inf')
                         if call_ratio >= 0.7:
                             direction = 'call_heavy'
                         elif call_ratio <= 0.3:
@@ -525,34 +577,79 @@ class InsiderAnomalyDetector:
                         else:
                             direction = 'mixed'
                     else:
+                        call_ratio = 0
+                        call_put_ratio = 0
                         direction = 'unknown'
                     
-                    # Store the symbol-level anomaly
+                    # Generate pattern description
+                    pattern_parts = []
+                    if call_multiplier > 5:
+                        pattern_parts.append(f"{call_multiplier:.1f}x call volume")
+                    if call_ratio >= 0.9:
+                        pattern_parts.append(f"{call_ratio*100:.0f}% calls")
+                    elif call_ratio >= 0.8:
+                        pattern_parts.append(f"Strong call bias ({call_ratio*100:.0f}%)")
+                    if details.get('otm_call_percentage', 0) > 50:
+                        pattern_parts.append("Heavy OTM calls")
+                    if details.get('short_term_percentage', 0) > 50:
+                        pattern_parts.append("Short-term focus")
+                    
+                    pattern_description = ", ".join(pattern_parts) if pattern_parts else "Unusual trading pattern"
+                    
+                    # Store the enhanced anomaly data
                     cur.execute("""
                         INSERT INTO temp_anomaly (
-                            event_date, symbol, direction, score, anomaly_types, 
-                            total_individual_anomalies, max_individual_score,
-                            details, as_of_timestamp
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            event_date, symbol, total_score, 
+                            volume_score, otm_score, directional_score, time_score,
+                            call_volume, put_volume, total_volume,
+                            call_baseline_avg, put_baseline_avg, call_multiplier, put_multiplier,
+                            direction, pattern_description, z_score,
+                            otm_call_percentage, short_term_percentage, call_put_ratio,
+                            as_of_timestamp
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (event_date, symbol) 
                         DO UPDATE SET
+                            total_score = EXCLUDED.total_score,
+                            volume_score = EXCLUDED.volume_score,
+                            otm_score = EXCLUDED.otm_score,
+                            directional_score = EXCLUDED.directional_score,
+                            time_score = EXCLUDED.time_score,
+                            call_volume = EXCLUDED.call_volume,
+                            put_volume = EXCLUDED.put_volume,
+                            total_volume = EXCLUDED.total_volume,
+                            call_baseline_avg = EXCLUDED.call_baseline_avg,
+                            put_baseline_avg = EXCLUDED.put_baseline_avg,
+                            call_multiplier = EXCLUDED.call_multiplier,
+                            put_multiplier = EXCLUDED.put_multiplier,
                             direction = EXCLUDED.direction,
-                            score = EXCLUDED.score,
-                            anomaly_types = EXCLUDED.anomaly_types,
-                            total_individual_anomalies = EXCLUDED.total_individual_anomalies,
-                            max_individual_score = EXCLUDED.max_individual_score,
-                            details = EXCLUDED.details,
+                            pattern_description = EXCLUDED.pattern_description,
+                            z_score = EXCLUDED.z_score,
+                            otm_call_percentage = EXCLUDED.otm_call_percentage,
+                            short_term_percentage = EXCLUDED.short_term_percentage,
+                            call_put_ratio = EXCLUDED.call_put_ratio,
                             as_of_timestamp = EXCLUDED.as_of_timestamp,
                             updated_at = CURRENT_TIMESTAMP
                     """, (
                         self.current_date,
                         symbol,
-                        direction,  # Now calculated based on actual call/put ratio
                         data['composite_score'],
-                        data['anomaly_types'],
-                        data['total_anomalies'],
-                        data['max_individual_score'],
-                        json.dumps(data['details'], default=str),
+                        details.get('volume_score', 0),
+                        details.get('otm_score', 0),
+                        details.get('directional_score', 0),
+                        details.get('time_score', 0),
+                        call_volume,
+                        put_volume,
+                        total_volume,
+                        call_baseline_avg,
+                        put_baseline_avg,
+                        call_multiplier,
+                        put_multiplier,
+                        direction,
+                        pattern_description,
+                        details.get('z_score', 0),
+                        details.get('otm_call_percentage', 0),
+                        details.get('short_term_percentage', 0),
+                        call_put_ratio,
                         datetime.now()
                     ))
                     stored_count += 1
