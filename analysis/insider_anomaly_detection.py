@@ -66,43 +66,9 @@ class InsiderAnomalyDetector:
             # Get baseline statistics for comparison
             baseline_stats = self._calculate_baseline_statistics()
             
-            # Run anomaly detection algorithms
-            anomalies = []
-            
-            # 1. Volume Concentration Detection
-            volume_anomalies = self._detect_volume_concentration(intraday_data, baseline_stats)
-            anomalies.extend(volume_anomalies)
-            
-            # 2. Strike Coordination Detection
-            strike_anomalies = self._detect_strike_coordination(intraday_data, baseline_stats)
-            anomalies.extend(strike_anomalies)
-            
-            # 3. Directional Bias Detection
-            directional_anomalies = self._detect_directional_bias(intraday_data, baseline_stats)
-            anomalies.extend(directional_anomalies)
-            
-            # 4. Expiration Clustering Detection
-            expiration_anomalies = self._detect_expiration_clustering(intraday_data, baseline_stats)
-            anomalies.extend(expiration_anomalies)
-            
-            # 5. Volatility Pattern Detection
-            volatility_anomalies = self._detect_volatility_patterns(intraday_data, baseline_stats)
-            anomalies.extend(volatility_anomalies)
-            
-            # 6. Contract Anomaly Detection (High-volume vs normal ratios)
-            contract_anomalies = self._detect_contract_anomalies(intraday_data, baseline_stats)
-            anomalies.extend(contract_anomalies)
-            
-            # 7. OTM Call Insider Pattern Detection
-            otm_call_anomalies = self._detect_otm_call_patterns(intraday_data, baseline_stats)
-            anomalies.extend(otm_call_anomalies)
-            
-            # 8. Greeks-based Anomaly Detection
-            greeks_anomalies = self._detect_greeks_anomalies(intraday_data, baseline_stats)
-            anomalies.extend(greeks_anomalies)
-            
-            # Roll up anomalies to symbol level and calculate composite scores
-            symbol_anomalies = self._rollup_to_symbol_level(anomalies)
+            # NEW: High-conviction insider trading detection (1-10 scoring)
+            # Focus on statistical anomalies vs baseline, not absolute volumes
+            symbol_anomalies = self._detect_high_conviction_insider_activity(intraday_data, baseline_stats)
             
             # Store results in database
             stored_count = self._store_anomalies(symbol_anomalies)
@@ -1101,6 +1067,201 @@ class InsiderAnomalyDetector:
                 })
         
         return anomalies
+
+    def _detect_high_conviction_insider_activity(self, data: List[Dict], baseline: Dict) -> Dict[str, Dict]:
+        """
+        NEW: High-conviction insider trading detection with 1-10 scoring.
+        Focus on statistical anomalies vs baseline, not absolute volumes.
+        """
+        logger.info("Running high-conviction insider trading analysis...")
+        
+        # Group data by symbol
+        symbol_data = {}
+        for contract in data:
+            symbol = contract['symbol']
+            if symbol not in symbol_data:
+                symbol_data[symbol] = []
+            symbol_data[symbol].append(contract)
+        
+        high_conviction_symbols = {}
+        
+        for symbol, contracts in symbol_data.items():
+            # Calculate symbol-level metrics
+            call_volume = sum(c['session_volume'] for c in contracts if c['contract_type'] == 'call')
+            put_volume = sum(c['session_volume'] for c in contracts if c['contract_type'] == 'put')
+            total_volume = call_volume + put_volume
+            
+            # Skip low-activity symbols
+            if total_volume < 500:  # Minimum volume threshold
+                continue
+            
+            # Get baseline data for this symbol
+            call_key = f"{symbol}_call"
+            put_key = f"{symbol}_put"
+            call_baseline = baseline.get('volume_stats', {}).get(call_key, {})
+            put_baseline = baseline.get('volume_stats', {}).get(put_key, {})
+            
+            if not call_baseline and not put_baseline:
+                continue  # No baseline data available
+            
+            # Calculate individual test scores (each 0-3 points max)
+            volume_score = self._calculate_volume_anomaly_score_v2(call_volume, put_volume, call_baseline, put_baseline)
+            otm_score = self._calculate_otm_call_score_v2(contracts)
+            directional_score = self._calculate_directional_bias_score_v2(call_volume, put_volume, total_volume)
+            time_pressure_score = self._calculate_time_pressure_score_v2(contracts)
+            
+            # Composite score (0-10 scale)
+            composite_score = min(volume_score + otm_score + directional_score + time_pressure_score, 10.0)
+            
+            # Only flag high-conviction cases (score >= 7.0)
+            if composite_score >= 7.0:
+                high_conviction_symbols[symbol] = {
+                    'symbol': symbol,
+                    'composite_score': round(composite_score, 1),
+                    'anomaly_types': ['high_conviction_insider_activity'],
+                    'total_anomalies': 1,
+                    'details': {
+                        'volume_score': round(volume_score, 1),
+                        'otm_call_score': round(otm_score, 1),
+                        'directional_score': round(directional_score, 1),
+                        'time_pressure_score': round(time_pressure_score, 1),
+                        'call_volume': call_volume,
+                        'put_volume': put_volume,
+                        'total_volume': total_volume,
+                        'call_baseline_avg': call_baseline.get('avg_daily_volume', 0),
+                        'put_baseline_avg': put_baseline.get('avg_daily_volume', 0)
+                    },
+                    'max_individual_score': composite_score
+                }
+        
+        logger.info(f"High-conviction analysis: {len(high_conviction_symbols)} symbols scored >= 7.0 out of {len(symbol_data)} analyzed")
+        return high_conviction_symbols
+    
+    def _calculate_volume_anomaly_score_v2(self, call_volume: int, put_volume: int, call_baseline: Dict, put_baseline: Dict) -> float:
+        """Calculate volume anomaly score (0-3 points)."""
+        score = 0.0
+        
+        # Call volume z-score
+        call_avg = call_baseline.get('avg_daily_volume', 0)
+        call_std = call_baseline.get('stddev_daily_volume', 1)
+        if call_std > 0 and call_avg > 0:
+            call_z = abs(call_volume - call_avg) / call_std
+            score += min(call_z / 3.0, 1.5)  # Max 1.5 points for calls
+        
+        # Put volume z-score  
+        put_avg = put_baseline.get('avg_daily_volume', 0)
+        put_std = put_baseline.get('stddev_daily_volume', 1)
+        if put_std > 0 and put_avg > 0:
+            put_z = abs(put_volume - put_avg) / put_std
+            score += min(put_z / 3.0, 1.5)  # Max 1.5 points for puts
+        
+        return min(score, 3.0)
+    
+    def _calculate_otm_call_score_v2(self, contracts: List[Dict]) -> float:
+        """Calculate out-of-the-money call concentration score (0-3 points)."""
+        call_contracts = [c for c in contracts if c['contract_type'] == 'call']
+        if not call_contracts:
+            return 0.0
+        
+        # Get underlying price
+        underlying_price = 0
+        for contract in contracts:
+            if contract.get('underlying_price'):
+                underlying_price = float(contract['underlying_price'])
+                break
+        
+        if underlying_price == 0:
+            return 0.0
+        
+        # Calculate OTM metrics
+        otm_call_volume = 0
+        total_call_volume = 0
+        short_term_otm_volume = 0
+        
+        from datetime import date, datetime
+        today = date.today()
+        
+        for contract in call_contracts:
+            volume = contract['session_volume']
+            strike = float(contract['strike_price']) if contract['strike_price'] else 0
+            exp_date = contract['expiration_date']
+            
+            total_call_volume += volume
+            
+            # OTM calls (strike > underlying * 1.05)
+            if strike > underlying_price * 1.05:
+                otm_call_volume += volume
+                
+                # Short-term OTM calls (highest conviction)
+                if isinstance(exp_date, str):
+                    exp_date = datetime.strptime(exp_date, '%Y-%m-%d').date()
+                
+                days_to_exp = (exp_date - today).days
+                if days_to_exp <= 21:  # 3 weeks or less
+                    short_term_otm_volume += volume
+        
+        if total_call_volume == 0:
+            return 0.0
+        
+        otm_ratio = otm_call_volume / total_call_volume
+        short_term_ratio = short_term_otm_volume / total_call_volume
+        
+        # Scoring: Heavy weight on short-term OTM calls (classic insider pattern)
+        score = (otm_ratio * 1.5) + (short_term_ratio * 1.5)  # Max 3.0
+        return min(score, 3.0)
+    
+    def _calculate_directional_bias_score_v2(self, call_volume: int, put_volume: int, total_volume: int) -> float:
+        """Calculate directional bias score (0-2 points)."""
+        if total_volume == 0:
+            return 0.0
+        
+        call_ratio = call_volume / total_volume
+        
+        # Strong call bias (potential bullish insider info)
+        if call_ratio > 0.8:  # 80%+ calls
+            return 2.0
+        elif call_ratio > 0.7:  # 70%+ calls
+            return 1.5
+        elif call_ratio > 0.6:  # 60%+ calls
+            return 1.0
+        elif call_ratio < 0.2:  # 80%+ puts (bearish insider info)
+            return 1.5
+        else:
+            return 0.0
+    
+    def _calculate_time_pressure_score_v2(self, contracts: List[Dict]) -> float:
+        """Calculate time pressure score based on expiration clustering (0-2 points)."""
+        from datetime import date, datetime
+        today = date.today()
+        
+        # Group by expiration
+        exp_volumes = {}
+        total_volume = 0
+        
+        for contract in contracts:
+            volume = contract['session_volume']
+            exp_date = contract['expiration_date']
+            
+            if isinstance(exp_date, str):
+                exp_date = datetime.strptime(exp_date, '%Y-%m-%d').date()
+            
+            days_to_exp = (exp_date - today).days
+            total_volume += volume
+            
+            if days_to_exp <= 7:  # This week
+                exp_volumes['this_week'] = exp_volumes.get('this_week', 0) + volume
+            elif days_to_exp <= 21:  # Next 3 weeks
+                exp_volumes['short_term'] = exp_volumes.get('short_term', 0) + volume
+        
+        if total_volume == 0:
+            return 0.0
+        
+        this_week_ratio = exp_volumes.get('this_week', 0) / total_volume
+        short_term_ratio = exp_volumes.get('short_term', 0) / total_volume
+        
+        # High scores for concentration in near-term expirations
+        score = (this_week_ratio * 1.2) + (short_term_ratio * 0.8)  # Max 2.0
+        return min(score, 2.0)
 
 
 def run_insider_anomaly_detection(baseline_days: int = 30) -> Dict[str, Any]:
