@@ -115,10 +115,10 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
             logger.error(f"[daily_option_snapshot] {ds} analytics update failed: {ce}")
         cur += _td(days=1)
 
-    # Note: Anomaly events are now kept in temp_anomaly table for ongoing analysis
-    logger.info("[anomaly_retention] Keeping temp_anomaly data for ongoing analysis (full table removed)")
+    # Note: Anomaly events are now kept in daily_anomaly_snapshot table for ongoing analysis
+    logger.info("[anomaly_retention] Keeping daily_anomaly_snapshot data for ongoing analysis")
     
-    # Clean up old temp_anomaly data using the built-in cleanup function
+    # Clean up old daily_anomaly_snapshot data using retention
     try:
         from database.core.connection import db as _db
         conn = _db.connect()
@@ -131,7 +131,7 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
         logger.error(f"[anomaly_retention] Failed to cleanup old anomaly data: {ae}")
 
     # Truncate temp_option and temp_stock to keep only fresh intraday going forward
-    # Note: temp_anomaly is NOT truncated to preserve ongoing anomaly analysis
+    # Note: daily_anomaly_snapshot is NOT truncated to preserve ongoing anomaly analysis
     try:
         from database.core.connection import db as _db
         _db.execute_command("TRUNCATE TABLE temp_option;")
@@ -165,7 +165,7 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
         ('daily_stock_snapshot', 'date', False),
         ('daily_option_snapshot', 'date', False),
         ('option_contracts', 'expiration_date', True),  # Expiration table - clean expired contracts
-        ('temp_anomaly', 'event_date', False),  # Clean old anomaly records using retention days
+        ('daily_anomaly_snapshot', 'event_date', False),  # Clean old anomaly records using retention days
     ]
     
     for table, date_col, is_expiration in tables_to_clean:

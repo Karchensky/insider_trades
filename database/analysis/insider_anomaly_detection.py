@@ -541,7 +541,7 @@ class InsiderAnomalyDetector:
         return min(score, 2.0)
 
     def _store_anomalies(self, anomalies: Dict[str, Dict]) -> int:
-        """Store detected anomalies in the enhanced temp_anomaly table."""
+        """Store detected anomalies in the daily_anomaly_snapshot table."""
         if not anomalies:
             return 0
         
@@ -598,7 +598,7 @@ class InsiderAnomalyDetector:
                     
                     # Store the enhanced anomaly data
                     cur.execute("""
-                        INSERT INTO temp_anomaly (
+                        INSERT INTO daily_anomaly_snapshot (
                             event_date, symbol, total_score, 
                             volume_score, otm_score, directional_score, time_score,
                             call_volume, put_volume, total_volume,

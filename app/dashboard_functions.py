@@ -17,7 +17,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.core.connection import db
 
 def get_current_anomalies() -> pd.DataFrame:
-    """Get current high-conviction anomalies from temp_anomaly table."""
+    """Get current high-conviction anomalies from daily_anomaly_snapshot table."""
     conn = db.connect()
     try:
         query = """
@@ -43,7 +43,7 @@ def get_current_anomalies() -> pd.DataFrame:
                 call_put_ratio,
                 as_of_timestamp,
                 event_date
-            FROM temp_anomaly
+            FROM daily_anomaly_snapshot
             WHERE event_date >= CURRENT_DATE - INTERVAL '7 days'
               AND total_score >= 7.0
             ORDER BY total_score DESC, as_of_timestamp DESC
@@ -129,12 +129,12 @@ def get_anomaly_timeline(days: int = 7) -> pd.DataFrame:
             SELECT 
                 event_date,
                 COUNT(*) as anomaly_count,
-                AVG(score) as avg_score,
-                MAX(score) as max_score,
-                ARRAY_AGG(symbol ORDER BY score DESC) as symbols
-            FROM temp_anomaly
+                AVG(total_score) as avg_score,
+                MAX(total_score) as max_score,
+                ARRAY_AGG(symbol ORDER BY total_score DESC) as symbols
+            FROM daily_anomaly_snapshot
             WHERE event_date >= CURRENT_DATE - INTERVAL '%s days'
-              AND score >= 7.0
+              AND total_score >= 7.0
             GROUP BY event_date
             ORDER BY event_date DESC
         """

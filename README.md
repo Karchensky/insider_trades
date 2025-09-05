@@ -58,7 +58,8 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
 
 ### Database: PostgreSQL (Supabase)
 
-- **Temporary Tables**: `temp_stock`, `temp_option`, `temp_anomaly` (intraday data)
+- **Temporary Tables**: `temp_stock`, `temp_option` (intraday data)
+- **Anomaly Storage**: `daily_anomaly_snapshot` (persistent anomaly records)
 - **Historical Tables**: `daily_stock_snapshot`, `daily_option_snapshot` (baseline data)
 - **Metadata Tables**: `option_contracts` (contract specifications)
 - **Views**: `anomaly_summary` (aggregated anomaly insights)
@@ -87,7 +88,7 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
    - Uses statistical Z-score analysis to identify genuine anomalies
    - Focuses on insider trading patterns: OTM calls, volume spikes, directional bias
    - Flags only high-conviction cases (score >= 7.0/10.0)
-   - Stores results in `temp_anomaly` table
+   - Stores results in `daily_anomaly_snapshot` table
 4. **Email Notifications**
 
    - Sends detailed HTML email alerts for high-conviction anomalies
@@ -125,13 +126,13 @@ python intraday_schedule.py --retention 1 --options-limit 50000
 4. **Temp Table Cleanup**
 
    - Truncates `temp_stock` and `temp_option` tables (intraday data no longer needed)
-   - Preserves `temp_anomaly` for historical analysis
+   - Preserves `daily_anomaly_snapshot` for historical analysis
 
 5. **Bulk Data Retention**
 
    - Removes `daily_stock_snapshot` and `daily_option_snapshot` data older than 30 days (configurable)
    - Removes `option_contracts` where expiration_date < (current_date - retention_days)
-   - Removes `temp_anomaly` records older than retention period
+   - Removes `daily_anomaly_snapshot` records older than retention period
    - Uses bulk operations for efficiency
 
 **Usage**:
@@ -259,7 +260,7 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 - **Retention**: 1 day (configurable)
 - **Update Frequency**: Every 15 minutes
 
-#### `temp_anomaly`
+#### `daily_anomaly_snapshot`
 
 - **Purpose**: High-conviction insider trading alerts
 - **Key Fields**: event_date, symbol, score, anomaly_types, details (JSONB), as_of_timestamp
@@ -297,7 +298,7 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 
 - **Purpose**: Aggregated view of anomaly detection results
 - **Security**: SECURITY INVOKER (respects user permissions)
-- **Data Source**: Joins temp_anomaly with contract and stock data
+- **Data Source**: Joins daily_anomaly_snapshot with contract and stock data
 
 ## Configuration and Usage
 
@@ -342,18 +343,18 @@ SELECT symbol, score,
        details->'time_pressure_score' as time_score,
        details->'call_volume' as call_volume,
        details->'put_volume' as put_volume
-FROM temp_anomaly 
-WHERE event_date = CURRENT_DATE AND score >= 7.0
-ORDER BY score DESC;
+FROM daily_anomaly_snapshot 
+WHERE event_date = CURRENT_DATE AND total_score >= 7.0
+ORDER BY total_score DESC;
 ```
 
 **Historical Anomaly Analysis**:
 
 ```sql
 SELECT event_date, COUNT(*) as anomaly_count, 
-       AVG(score) as avg_score, MAX(score) as max_score
-FROM temp_anomaly 
-WHERE score >= 7.0
+       AVG(total_score) as avg_score, MAX(total_score) as max_score
+FROM daily_anomaly_snapshot 
+WHERE total_score >= 7.0
 GROUP BY event_date 
 ORDER BY event_date DESC;
 ```

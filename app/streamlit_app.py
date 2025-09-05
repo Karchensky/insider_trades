@@ -50,7 +50,7 @@ def main():
             ['Overview'] + symbols
         )
         
-        if st.sidebar.button("🔄 Refresh Data"):
+        if st.sidebar.button("Refresh Data"):
             st.rerun()
         
         # Main content
@@ -60,9 +60,23 @@ def main():
             create_anomaly_timeline_chart(timeline_df)
         else:
             symbol_anomaly = anomalies_df[anomalies_df['symbol'] == selected_symbol].iloc[0]
+            # Build anomaly data from new table structure
             anomaly_data = {
-                'composite_score': symbol_anomaly['score'],
-                'details': symbol_anomaly['details'] if isinstance(symbol_anomaly['details'], dict) else {}
+                'composite_score': float(symbol_anomaly['score']),
+                'details': {
+                    'volume_score': float(symbol_anomaly.get('volume_score', 0)),
+                    'otm_call_score': float(symbol_anomaly.get('otm_score', 0)),  # Note: function expects 'otm_call_score'
+                    'directional_score': float(symbol_anomaly.get('directional_score', 0)),
+                    'time_pressure_score': float(symbol_anomaly.get('time_score', 0)),  # Note: function expects 'time_pressure_score'
+                    'call_volume': int(symbol_anomaly.get('call_volume', 0)),
+                    'put_volume': int(symbol_anomaly.get('put_volume', 0)),
+                    'total_volume': int(symbol_anomaly.get('total_volume', 0)),
+                    'call_baseline_avg': float(symbol_anomaly.get('call_baseline_avg', 0)),
+                    'put_baseline_avg': float(symbol_anomaly.get('put_baseline_avg', 0)),
+                    'call_multiplier': float(symbol_anomaly.get('call_multiplier', 0)),
+                    'pattern_description': symbol_anomaly.get('pattern_description', 'Unusual trading pattern'),
+                    'z_score': float(symbol_anomaly.get('z_score', 0))
+                }
             }
             create_symbol_analysis(selected_symbol, anomaly_data)
     else:

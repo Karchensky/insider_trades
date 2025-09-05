@@ -100,7 +100,7 @@ def up():
                 BEGIN
                     cutoff_date := CURRENT_DATE - INTERVAL '1 day' * retention_days;
                     
-                    DELETE FROM temp_anomaly 
+                    DELETE FROM daily_anomaly_snapshot 
                     WHERE event_date < cutoff_date;
                     
                     GET DIAGNOSTICS deleted_count = ROW_COUNT;
@@ -183,7 +183,7 @@ def down():
                 BEGIN
                     cutoff_date := CURRENT_DATE - INTERVAL '1 day' * retention_days;
                     
-                    DELETE FROM temp_anomaly 
+                    DELETE FROM daily_anomaly_snapshot 
                     WHERE event_date < cutoff_date;
                     
                     GET DIAGNOSTICS deleted_count = ROW_COUNT;
