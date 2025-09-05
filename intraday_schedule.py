@@ -26,7 +26,7 @@ from scrapers.polygon_full_market_snapshot_scraper import FullMarketSnapshotScra
 from scrapers.polygon_unified_options_snapshot_scraper import UnifiedOptionsSnapshotScraper
 from database.bulk_operations import BulkStockDataLoader
 from maintenance.data_retention import DataRetentionManager
-from analysis.enhanced_anomaly_detection import run_enhanced_intraday_detection
+from analysis.insider_anomaly_detection import run_insider_anomaly_detection
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -175,13 +175,16 @@ def run_once(include_otc: bool,
                         logger.error("[temp_option] Super-batch load failed: %s", out.get('error'))
             logger.info("[temp_option] Total loaded: %d rows", total_loaded)
             
-            # Run enhanced anomaly detection system
-            logger.info("[anomaly_detection] Starting enhanced anomaly detection...")
+            # Run insider trading anomaly detection
+            logger.info("[anomaly_detection] Starting insider trading anomaly detection...")
             try:
-                enhanced_results = run_enhanced_intraday_detection()
-                logger.info("[anomaly_detection] Enhanced detection results: %s", enhanced_results)
+                anomaly_results = run_insider_anomaly_detection(baseline_days=30)
+                if anomaly_results.get('success'):
+                    logger.info(f"[anomaly_detection] Detected {anomaly_results.get('anomalies_detected', 0)} symbol-level anomalies from {anomaly_results.get('contracts_analyzed', 0)} contracts")
+                else:
+                    logger.error(f"[anomaly_detection] Detection failed: {anomaly_results.get('error')}")
             except Exception as ee:
-                logger.error("[anomaly_detection] Enhanced detection failed: %s", ee)
+                logger.error(f"[anomaly_detection] Detection error: {ee}")
     except Exception as e:
         logger.error(f"Options snapshot error: {e}")
 
@@ -200,16 +203,15 @@ def apply_retention(retention_days: int) -> None:
         logger.info("Retention temp_option: cutoff=%s deleted=%s", res['cutoff_date'], res['records_deleted'])
     except Exception as e:
         logger.error(f"Retention failed for temp_option: {e}")
-    # Note: temp_anomaly is NOT truncated to preserve ongoing anomaly analysis
-    # Only cleanup very old data (7+ days) to maintain performance
+    # temp_anomaly: use the built-in cleanup function (7 day retention)
     try:
-        cleanup_sql = """
-        DELETE FROM temp_anomaly 
-        WHERE event_date < CURRENT_DATE - INTERVAL '7 days'
-        """
         from database.connection import db
-        result = db.execute_command(cleanup_sql)
-        logger.info("Retention temp_anomaly: cleaned up data older than 7 days")
+        conn = db.connect()
+        with conn.cursor() as cur:
+            cur.execute("SELECT cleanup_old_anomalies(7);")
+            deleted_count = cur.fetchone()[0]
+            conn.commit()
+        logger.info(f"Retention temp_anomaly: cleaned up {deleted_count} old anomaly records (7+ days)")
     except Exception as e:
         logger.error(f"Retention failed for temp_anomaly: {e}")
 

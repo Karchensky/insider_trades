@@ -36,9 +36,23 @@ def load_latest_anomalies(limit: int = 200, dsn: str | None = None):
     with get_conn(dsn).cursor() as cur:
         cur.execute(
             """
-            SELECT event_date, symbol, contract_ticker, as_of_timestamp, kind, score,
-                   COALESCE(details::text, '{}') AS details
-            FROM anomaly_event
+            SELECT 
+                event_date, 
+                symbol, 
+                direction,
+                score,
+                anomaly_types,
+                total_individual_anomalies,
+                max_individual_score,
+                CASE 
+                    WHEN score >= 7.0 THEN 'CRITICAL'
+                    WHEN score >= 5.0 THEN 'HIGH'
+                    WHEN score >= 3.0 THEN 'MEDIUM'
+                    ELSE 'LOW'
+                END as risk_level,
+                details::text as details,
+                as_of_timestamp
+            FROM temp_anomaly
             ORDER BY event_date DESC, score DESC
             LIMIT %s
             """,

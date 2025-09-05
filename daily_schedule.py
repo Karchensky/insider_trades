@@ -25,6 +25,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from scrapers.polygon_daily_scraper import PolygonDailyScraper
 from scrapers.polygon_option_flatfile_loader import PolygonOptionFlatFileLoader
+from scrapers.polygon_option_contracts_scraper import PolygonOptionContractsScraper
 from maintenance.data_retention import DataRetentionManager
 
 
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
                        force: bool, ticker_limit: int | None, contract_limit: int | None,
-                       dry_run_retention: bool) -> int:
+                       dry_run_retention: bool, anomaly_retention: int = 30) -> int:
     start_ts = datetime.now()
 
     # 1) Determine recent trading day range
@@ -75,6 +76,31 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
             logger.error(f"[daily_option_snapshot] {ds} failed: {fe}")
         cur += _td(days=1)
 
+    # 4) Populate option_contracts (contract metadata)
+    logger.info("[option_contracts] Step 3/3: loading contract metadata...")
+    try:
+        contracts_scraper = PolygonOptionContractsScraper()
+        
+        # Use smart incremental approach - only process symbols with new contracts
+        contracts_results = contracts_scraper.scrape_incremental_smart(symbol_limit=ticker_limit)
+        
+        if contracts_results.get('success'):
+            if contracts_results.get('symbols_processed', 0) > 0:
+                logger.info(f"[option_contracts] ✓ {contracts_results['total_contracts']} contracts loaded for {contracts_results['successful_symbols']} symbols")
+                logger.info(f"[option_contracts] ✓ {contracts_results['api_calls_made']} API calls in {contracts_results['duration']:.1f}s")
+            else:
+                logger.info("[option_contracts] ✓ All contracts up to date - no new contracts found")
+        else:
+            logger.warning(f"[option_contracts] ⚠ Partial success: {contracts_results['successful_symbols']}/{contracts_results['symbols_processed']} symbols")
+            if contracts_results.get('failed_symbols'):
+                failed_list = [item[0] if isinstance(item, tuple) else str(item) for item in contracts_results['failed_symbols'][:3]]
+                logger.warning(f"[option_contracts] ⚠ Failed symbols: {', '.join(failed_list)}" + 
+                             ("..." if len(contracts_results['failed_symbols']) > 3 else ""))
+            # Don't fail the entire pipeline for contracts metadata
+    except Exception as contracts_error:
+        logger.error(f"[option_contracts] Failed to load contract metadata: {contracts_error}")
+        # Continue with pipeline even if contracts fail
+
     # Update daily_option_snapshot with latest analytics data from temp_option for the processed dates
     logger.info("[daily_option_snapshot] Updating analytics columns with latest temp data...")
     from database.bulk_operations import BulkStockDataLoader as _Loader
@@ -93,15 +119,15 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     # The full_daily_anomaly_snapshot table has been removed as part of schema restructuring
     logger.info("[anomaly_retention] Keeping temp_anomaly data for ongoing analysis (full table removed)")
     
-    # Clean up old temp_anomaly data (keep only current day and recent data for ongoing intraday)
+    # Clean up old temp_anomaly data using the built-in cleanup function
     try:
         from database.connection import db as _db
-        cleanup_sql = """
-        DELETE FROM temp_anomaly 
-        WHERE event_date < CURRENT_DATE - INTERVAL '7 days'
-        """
-        result = _db.execute_command(cleanup_sql)
-        logger.info("[anomaly_retention] Cleaned up old temp_anomaly data (keeping recent 7 days)")
+        conn = _db.connect()
+        with conn.cursor() as cur:
+            cur.execute("SELECT cleanup_old_anomalies(%s);", (anomaly_retention,))
+            deleted_count = cur.fetchone()[0]
+            conn.commit()
+        logger.info(f"[anomaly_retention] Cleaned up {deleted_count} old anomaly records ({anomaly_retention}+ days)")
     except Exception as ae:
         logger.error(f"[anomaly_retention] Failed to cleanup old anomaly data: {ae}")
 
@@ -119,18 +145,25 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     except Exception as te:
         logger.error(f"[temp_option] truncate failed: {te}")
 
-    # 5) Retention cleanup for core tables
-    logger.info("Applying retention policy…")
+    # 5) Retention cleanup for core tables (using bulk deletion for efficiency)
+    logger.info("Applying retention policy with bulk deletion…")
     retention = DataRetentionManager()
-    for table, date_col in (
-        ('daily_stock_snapshot', 'date'),
-        ('daily_option_snapshot', 'date'),
-    ):
+    tables_to_clean = [
+        ('daily_stock_snapshot', 'date', False),
+        ('daily_option_snapshot', 'date', False),
+        ('option_contracts', 'expiration_date', True),  # Expiration table - clean expired contracts
+    ]
+    
+    for table, date_col, is_expiration in tables_to_clean:
         try:
-            res = retention.delete_old_records(
-                table, date_col, retention_days, dry_run=dry_run_retention
+            # Use bulk deletion for better performance
+            res = retention.bulk_delete_old_records(
+                table, date_col, retention_days, dry_run=dry_run_retention, 
+                is_expiration_table=is_expiration
             )
-            logger.info(f"Retention {table}: cutoff={res['cutoff_date']} identified={res['records_identified']:,} deleted={res['records_deleted']:,}")
+            duration = res.get('duration_seconds', 0)
+            deleted = res.get('records_deleted', 0)
+            logger.info(f"Retention {table}: cutoff={res['cutoff_date']} deleted={deleted:,} records in {duration:.2f}s")
         except Exception as e:
             logger.error(f"Retention failed for {table}: {e}")
 
@@ -148,6 +181,8 @@ def main():
     parser.add_argument('--ticker-limit', type=int, help='Limit underlying tickers for contracts step (testing)')
     parser.add_argument('--contract-limit', type=int, help='Limit contracts for snapshots step (testing)')
     parser.add_argument('--dry-run-retention', action='store_true', help='Do not delete rows; report only')
+    parser.add_argument('--anomaly-retention', type=int, default=int(os.getenv('ANOMALY_RETENTION_DAYS', '30')), 
+                        help='Anomaly retention in days (default: 30)')
 
     args = parser.parse_args()
 
@@ -160,6 +195,7 @@ def main():
             ticker_limit=args.ticker_limit,
             contract_limit=args.contract_limit,
             dry_run_retention=args.dry_run_retention,
+            anomaly_retention=args.anomaly_retention,
         ))
     except Exception as e:
         logger.error(f"Daily pipeline failed: {e}")

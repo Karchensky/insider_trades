@@ -228,8 +228,27 @@ class BulkStockDataLoader:
                 session = r.get('session') or {}
                 underlying = r.get('underlying_asset') or {}
 
-                # underlying stock symbol
+                # Extract underlying stock symbol from contract ticker
+                # Format: O:SYMBOLYYMMDD[CP]XXXXX
                 symbol_val = underlying.get('ticker') or ''
+                if not symbol_val and contract_ticker:
+                    # Parse symbol from contract ticker (e.g., "O:AAPL250916C00150000" -> "AAPL")
+                    if contract_ticker.startswith('O:') and len(contract_ticker) > 2:
+                        ticker_part = contract_ticker[2:]  # Remove "O:"
+                        # Find the end of symbol (before date digits)
+                        symbol_end = 0
+                        for i, char in enumerate(ticker_part):
+                            if char.isdigit():
+                                symbol_end = i
+                                break
+                        if symbol_end > 0:
+                            symbol_val = ticker_part[:symbol_end]
+
+                # Get underlying price from various sources
+                underlying_price = underlying.get('price')
+
+                # FALLBACK: If no underlying price in API response, we need to enrich later
+                # For now, we'll store NULL and enrich post-load
 
                 buf.write(
                     f"{f(as_of)}\t{symbol_val}\t{contract_ticker}\t"
@@ -241,7 +260,7 @@ class BulkStockDataLoader:
                     f"{f(session.get('early_trading_change'))}\t{f(session.get('early_trading_change_percent'))}\t"
                     f"{f(session.get('regular_trading_change'))}\t{f(session.get('regular_trading_change_percent'))}\t"
                     f"{f(session.get('late_trading_change'))}\t{f(session.get('late_trading_change_percent'))}\t{f(session.get('previous_close'))}\t"
-                    f"{f(underlying.get('ticker'))}\t{f(underlying.get('price'))}\t{f(underlying.get('change_to_break_even'))}\t{f(to_ts(underlying.get('last_updated')))}\n"
+                    f"{f(underlying.get('ticker') or symbol_val)}\t{f(underlying_price)}\t{f(underlying.get('change_to_break_even'))}\t{f(to_ts(underlying.get('last_updated')))}\n"
                 )
                 rows += 1
             except Exception as e:
@@ -1356,6 +1375,73 @@ class DatabaseOptimizer:
             logger.info(f"Triggers enabled for {table_name}")
         except Exception as e:
             logger.warning(f"Failed to enable triggers: {e}")
+
+    def enrich_temp_option_underlying_prices(self) -> Dict[str, Any]:
+        """
+        Enrich temp_option table with underlying prices from temp_stock.
+        This is a critical fix for the anomaly detection system.
+        """
+        start = time.time()
+        try:
+            conn = db.connect()
+            with conn.cursor() as cur:
+                # Update underlying prices from temp_stock data
+                update_query = """
+                UPDATE temp_option
+                SET underlying_price = ts.day_close,
+                    underlying_ticker = ts.symbol,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM (
+                    SELECT DISTINCT ON (symbol)
+                        symbol,
+                        day_close,
+                        as_of_timestamp
+                    FROM temp_stock
+                    WHERE day_close IS NOT NULL
+                      AND day_close > 0
+                    ORDER BY symbol, as_of_timestamp DESC
+                ) ts
+                WHERE temp_option.symbol = ts.symbol
+                  AND temp_option.underlying_price IS NULL
+                """
+
+                cur.execute(update_query)
+                updated_count = cur.rowcount
+
+                # Log the enrichment results
+                logger.info(f"Enriched {updated_count} temp_option records with underlying prices")
+
+                # Check how many still need prices
+                check_query = """
+                SELECT COUNT(*) as count
+                FROM temp_option
+                WHERE underlying_price IS NULL
+                """
+                cur.execute(check_query)
+                still_null = cur.fetchone()[0]
+
+                logger.info(f"Still {still_null} records without underlying prices")
+
+                conn.commit()
+
+                execution_time = time.time() - start
+                return {
+                    'success': True,
+                    'records_updated': updated_count,
+                    'records_still_null': still_null,
+                    'execution_time': execution_time
+                }
+
+        except Exception as e:
+            logger.error(f"Underlying price enrichment failed: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'execution_time': time.time() - start
+            }
+        finally:
+            if 'conn' in locals():
+                conn.close()
 
 
 # Convenience functions

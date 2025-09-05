@@ -184,7 +184,8 @@ class DataRetentionManager:
             raise
     
     def delete_old_records(self, table_name: str, date_column: str, retention_days: int, 
-                          dry_run: bool = True, batch_size: int = 1000) -> dict:
+                          dry_run: bool = True, batch_size: int = 1000, 
+                          is_expiration_table: bool = False) -> dict:
         """
         Delete old records from a table based on business day retention.
         
@@ -433,6 +434,107 @@ class DataRetentionManager:
                 }
         
         return results
+    
+    def bulk_delete_old_records(self, table_name: str, date_column: str, 
+                               retention_days: int, dry_run: bool = False, 
+                               is_expiration_table: bool = False) -> Dict[str, Any]:
+        """
+        Perform bulk deletion of old records in a single operation (no batching).
+        
+        This is more efficient than batched deletion for large cleanup operations
+        but may lock the table longer. Use for end-of-day cleanup operations.
+        
+        Args:
+            table_name: Name of the table to clean up
+            date_column: Name of the date column to use for retention
+            retention_days: Number of business days to retain
+            dry_run: If True, only report what would be deleted
+            is_expiration_table: If True, delete records where expiration_date < (current_date - retention_days)
+                               If False, delete records where date_column < cutoff_date (normal behavior)
+            
+        Returns:
+            Dictionary with deletion statistics
+        """
+        import time
+        start_time = time.time()
+        
+        logger.info(f"Starting BULK retention cleanup for table '{table_name}'")
+        logger.info(f"Retention policy: {retention_days} business days")
+        logger.info(f"Date column: {date_column}")
+        logger.info(f"Mode: {'DRY RUN' if dry_run else 'BULK DELETION'}")
+        logger.info(f"Table type: {'Expiration table' if is_expiration_table else 'Data table'}")
+        
+        # Validate inputs
+        if not self.validate_table_and_column(table_name, date_column):
+            raise ValueError(f"Invalid table '{table_name}' or column '{date_column}'")
+        
+        # Calculate cutoff date
+        if is_expiration_table:
+            # For expiration tables, delete contracts that expired more than retention_days ago
+            cutoff_date = self.calculate_cutoff_date(retention_days)
+            logger.info(f"Expiration table mode: Deleting contracts expired before {cutoff_date}")
+        else:
+            # Normal mode for data tables
+            cutoff_date = self.calculate_cutoff_date(retention_days)
+        
+        # Get count of records to delete
+        records_to_delete = self.get_records_to_delete_count(table_name, date_column, cutoff_date)
+        
+        logger.info(f"Records older than {cutoff_date}: {records_to_delete:,}")
+        
+        if records_to_delete == 0:
+            logger.info("No records to delete")
+            return {
+                'success': True,
+                'records_deleted': 0,
+                'cutoff_date': cutoff_date,
+                'duration_seconds': time.time() - start_time
+            }
+        
+        if dry_run:
+            logger.info(f"DRY RUN: Would delete {records_to_delete:,} records")
+            return {
+                'success': True,
+                'records_deleted': 0,
+                'dry_run': True,
+                'would_delete': records_to_delete,
+                'cutoff_date': cutoff_date,
+                'duration_seconds': time.time() - start_time
+            }
+        
+        # Perform bulk deletion
+        delete_sql = f"""
+            DELETE FROM {table_name} 
+            WHERE {date_column} < %s
+        """
+        
+        try:
+            logger.info(f"Executing bulk deletion for {records_to_delete:,} records...")
+            
+            conn = db.connect()
+            with conn.cursor() as cursor:
+                cursor.execute(delete_sql, (cutoff_date,))
+                actual_deleted = cursor.rowcount
+                conn.commit()
+            
+            logger.info(f"✓ Bulk deletion completed: {actual_deleted:,} records deleted in {time.time() - start_time:.2f}s")
+            
+            return {
+                'success': True,
+                'records_deleted': actual_deleted,
+                'cutoff_date': cutoff_date,
+                'duration_seconds': time.time() - start_time
+            }
+            
+        except Exception as e:
+            logger.error(f"Error during bulk retention cleanup: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'records_deleted': 0,
+                'cutoff_date': cutoff_date,
+                'duration_seconds': time.time() - start_time
+            }
 
 
 def main():
