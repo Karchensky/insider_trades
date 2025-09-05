@@ -21,7 +21,7 @@ from typing import Dict, List
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scrapers.polygon_option_contracts_scraper import PolygonOptionContractsScraper
-from database.connection import db
+from database.core.connection import db
 
 # Configure logging
 logging.basicConfig(

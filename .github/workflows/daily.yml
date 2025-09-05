@@ -3,7 +3,7 @@ name: Daily Process
 on:
   schedule:
     # 8:00 AM EST (13:00 UTC) on weekdays - day after business days
-    - cron: '0 12 * * 2-6'
+    - cron: '0 13 * * 2-6'
   workflow_dispatch: {}
 
 jobs:
@@ -32,4 +32,4 @@ jobs:
 
       - name: Run daily process
         run: |
-          python daily_schedule.py --recent 30 --retention 30 | cat
+          python daily_schedule.py --recent 3 --retention 30 | cat

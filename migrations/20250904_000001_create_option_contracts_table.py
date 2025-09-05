@@ -8,7 +8,7 @@ separate from the pricing/volume data in daily_option_snapshot.
 """
 
 import logging
-from database.connection import db
+from database.core.connection import db
 
 logger = logging.getLogger(__name__)
 

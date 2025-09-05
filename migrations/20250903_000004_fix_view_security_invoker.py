@@ -7,7 +7,7 @@ with explicit SECURITY INVOKER to use the querying user's permissions.
 """
 
 import logging
-from database.connection import db
+from database.core.connection import db
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ Increases field sizes for option_contracts table based on actual Polygon.io API 
 """
 
 import logging
-from database.connection import db
+from database.core.connection import db
 
 logger = logging.getLogger(__name__)
 

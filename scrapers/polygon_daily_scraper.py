@@ -18,8 +18,8 @@ from time import sleep
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database.stock_data import StockDataManager
-from database.bulk_operations import bulk_insert_polygon_data, BulkStockDataLoader
+from database.core.stock_data import StockDataManager
+from database.core.bulk_operations import BulkStockDataLoader
 from dotenv import load_dotenv
 
 # Load environment variables

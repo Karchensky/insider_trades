@@ -648,13 +648,13 @@ def main():
             print(f"  Batches processed: {results['batches_processed']}")
         
         if dry_run:
-            print(f"\n💡 This was a dry run. Use --execute to actually delete records.")
+            print(f"\nThis was a dry run. Use --execute to actually delete records.")
         else:
-            print(f"\n✅ Deletion completed successfully!")
+            print(f"\nDeletion completed successfully!")
             
     except Exception as e:
         logger.error(f"Retention cleanup failed: {e}")
-        print(f"\n❌ Error: {e}")
+        print(f"\nError: {e}")
         sys.exit(1)
 
 

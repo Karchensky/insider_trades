@@ -26,7 +26,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from scrapers.polygon_daily_scraper import PolygonDailyScraper
 from scrapers.polygon_option_flatfile_loader import PolygonOptionFlatFileLoader
 from scrapers.polygon_option_contracts_scraper import PolygonOptionContractsScraper
-from maintenance.data_retention import DataRetentionManager
+from database.maintenance.data_retention import DataRetentionManager
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -103,7 +103,7 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
 
     # Update daily_option_snapshot with latest analytics data from temp_option for the processed dates
     logger.info("[daily_option_snapshot] Updating analytics columns with latest temp data...")
-    from database.bulk_operations import BulkStockDataLoader as _Loader
+    from database.core.bulk_operations import BulkStockDataLoader as _Loader
     _l = _Loader()
     cur = s
     while cur <= e:
@@ -116,12 +116,11 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
         cur += _td(days=1)
 
     # Note: Anomaly events are now kept in temp_anomaly table for ongoing analysis
-    # The full_daily_anomaly_snapshot table has been removed as part of schema restructuring
     logger.info("[anomaly_retention] Keeping temp_anomaly data for ongoing analysis (full table removed)")
     
     # Clean up old temp_anomaly data using the built-in cleanup function
     try:
-        from database.connection import db as _db
+        from database.core.connection import db as _db
         conn = _db.connect()
         with conn.cursor() as cur:
             cur.execute("SELECT cleanup_old_anomalies(%s);", (anomaly_retention,))
@@ -134,7 +133,7 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     # Truncate temp_option and temp_stock to keep only fresh intraday going forward
     # Note: temp_anomaly is NOT truncated to preserve ongoing anomaly analysis
     try:
-        from database.connection import db as _db
+        from database.core.connection import db as _db
         _db.execute_command("TRUNCATE TABLE temp_option;")
         logger.info("[temp_option] truncated after daily snapshot capture")
         try:
@@ -148,10 +147,25 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     # 5) Retention cleanup for core tables (using bulk deletion for efficiency)
     logger.info("Applying retention policy with bulk deletion…")
     retention = DataRetentionManager()
+    # Step 5: Truncate temp tables (intraday data no longer needed after daily processing)
+    logger.info("Step 5: Truncating temp tables...")
+    try:
+        from database.core.connection import db as _db
+        _conn = _db.connect()
+        with _conn.cursor() as _cur:
+            _cur.execute("TRUNCATE temp_stock, temp_option")
+            _conn.commit()
+        _conn.close()
+        logger.info("✓ Truncated temp_stock and temp_option tables")
+    except Exception as e:
+        logger.error(f"✗ Failed to truncate temp tables: {e}")
+    
+    # Step 6: Retention cleanup for historical and anomaly data
     tables_to_clean = [
         ('daily_stock_snapshot', 'date', False),
         ('daily_option_snapshot', 'date', False),
         ('option_contracts', 'expiration_date', True),  # Expiration table - clean expired contracts
+        ('temp_anomaly', 'event_date', False),  # Clean old anomaly records using retention days
     ]
     
     for table, date_col, is_expiration in tables_to_clean:

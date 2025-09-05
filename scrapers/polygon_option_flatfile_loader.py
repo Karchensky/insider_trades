@@ -23,8 +23,8 @@ from dotenv import load_dotenv
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database.connection import db
-from database.bulk_operations import BulkStockDataLoader
+from database.core.connection import db
+from database.core.bulk_operations import BulkStockDataLoader
 
 logger = logging.getLogger(__name__)
 

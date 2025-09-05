@@ -19,8 +19,8 @@ from io import StringIO
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database.connection import db
-from database.bulk_operations import BulkStockDataLoader
+from database.core.connection import db
+from database.core.bulk_operations import BulkStockDataLoader
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)

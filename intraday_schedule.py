@@ -24,9 +24,10 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from scrapers.polygon_full_market_snapshot_scraper import FullMarketSnapshotScraper
 from scrapers.polygon_unified_options_snapshot_scraper import UnifiedOptionsSnapshotScraper
-from database.bulk_operations import BulkStockDataLoader
-from maintenance.data_retention import DataRetentionManager
-from analysis.insider_anomaly_detection import run_insider_anomaly_detection
+from database.core.bulk_operations import BulkStockDataLoader
+from database.maintenance.data_retention import DataRetentionManager
+from database.analysis.insider_anomaly_detection import InsiderAnomalyDetector
+from notifications.email_notifier import send_anomaly_notification
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -59,7 +60,7 @@ def run_once(include_otc: bool,
     # Options: high-throughput concurrent by explicit tickers (fast path)
     try:
         opt_scraper = UnifiedOptionsSnapshotScraper()
-        from database.connection import db
+        from database.core.connection import db
         latest_date_rows = db.execute_query("SELECT MAX(date) AS d FROM daily_option_snapshot")
         latest_date = latest_date_rows[0]['d'] if latest_date_rows and latest_date_rows[0]['d'] else None
         if not latest_date:
@@ -175,45 +176,41 @@ def run_once(include_otc: bool,
                         logger.error("[temp_option] Super-batch load failed: %s", out.get('error'))
             logger.info("[temp_option] Total loaded: %d rows", total_loaded)
             
-            # Run insider trading anomaly detection
-            logger.info("[anomaly_detection] Starting insider trading anomaly detection...")
+            # Run high-conviction insider trading anomaly detection
+            logger.info("[anomaly_detection] Starting high-conviction insider trading analysis...")
             try:
-                anomaly_results = run_insider_anomaly_detection(baseline_days=30)
+                detector = InsiderAnomalyDetector()
+                anomaly_results = detector.run_detection()
                 if anomaly_results.get('success'):
-                    logger.info(f"[anomaly_detection] Detected {anomaly_results.get('anomalies_detected', 0)} symbol-level anomalies from {anomaly_results.get('contracts_analyzed', 0)} contracts")
+                    anomaly_count = anomaly_results.get('anomalies_detected', 0)
+                    contracts_analyzed = anomaly_results.get('contracts_analyzed', 0)
+                    logger.info(f"[anomaly_detection] ✓ {anomaly_count} high-conviction anomalies detected from {contracts_analyzed:,} contracts")
+                    
+                    if anomaly_count > 0:
+                        logger.info(f"[anomaly_detection] ✓ Flagged symbols require investigation for potential insider activity")
+                        
+                        # Send email notification for high-conviction anomalies
+                        logger.info("[notifications] Sending email alert for high-conviction anomalies...")
+                        try:
+                            # Get the detected anomalies from the detector
+                            anomalies = anomaly_results.get('anomalies', {})
+                            if send_anomaly_notification(anomalies):
+                                logger.info(f"[notifications] ✓ Email alert sent for {anomaly_count} anomalies")
+                            else:
+                                logger.warning("[notifications] ✗ Email alert failed to send")
+                        except Exception as ne:
+                            logger.error(f"[notifications] ✗ Email notification error: {ne}")
+                    else:
+                        logger.info("[anomaly_detection] ✓ No high-conviction anomalies detected - market activity within normal ranges")
                 else:
-                    logger.error(f"[anomaly_detection] Detection failed: {anomaly_results.get('error')}")
+                    logger.error(f"[anomaly_detection] ✗ Detection failed: {anomaly_results.get('error')}")
             except Exception as ee:
-                logger.error(f"[anomaly_detection] Detection error: {ee}")
+                logger.error(f"[anomaly_detection] ✗ Detection error: {ee}")
     except Exception as e:
         logger.error(f"Options snapshot error: {e}")
 
 
-def apply_retention(retention_days: int) -> None:
-    manager = DataRetentionManager()
-    # temp_stock: use created_at (timestamp) for age
-    try:
-        res = manager.delete_old_records('temp_stock', 'created_at', retention_days, dry_run=False)
-        logger.info("Retention temp_stock: cutoff=%s deleted=%s", res['cutoff_date'], res['records_deleted'])
-    except Exception as e:
-        logger.error(f"Retention failed for temp_stock: {e}")
-    # temp_option: use as_of_timestamp
-    try:
-        res = manager.delete_old_records('temp_option', 'as_of_timestamp', retention_days, dry_run=False)
-        logger.info("Retention temp_option: cutoff=%s deleted=%s", res['cutoff_date'], res['records_deleted'])
-    except Exception as e:
-        logger.error(f"Retention failed for temp_option: {e}")
-    # temp_anomaly: use the built-in cleanup function (7 day retention)
-    try:
-        from database.connection import db
-        conn = db.connect()
-        with conn.cursor() as cur:
-            cur.execute("SELECT cleanup_old_anomalies(7);")
-            deleted_count = cur.fetchone()[0]
-            conn.commit()
-        logger.info(f"Retention temp_anomaly: cleaned up {deleted_count} old anomaly records (7+ days)")
-    except Exception as e:
-        logger.error(f"Retention failed for temp_anomaly: {e}")
+# Retention cleanup removed from intraday process - handled by daily process
 
 
 def main():
@@ -240,7 +237,7 @@ def main():
              options_batch_calls=args.options_batch_calls,
              options_workers=args.options_workers,
              options_test_contracts=args.options_test_contracts)
-    apply_retention(retention_days=args.retention)
+    # Note: Retention cleanup is handled by daily process to avoid redundancy
     if args.delay_seconds > 0:
         time.sleep(args.delay_seconds)
 

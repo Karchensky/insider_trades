@@ -11,7 +11,7 @@ Changes:
 """
 
 import logging
-from database.connection import db
+from database.core.connection import db
 
 logger = logging.getLogger(__name__)
 
