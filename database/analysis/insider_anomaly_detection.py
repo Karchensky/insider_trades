@@ -375,24 +375,26 @@ class InsiderAnomalyDetector:
         return high_conviction_symbols
     
     def _calculate_volume_anomaly_score_v2(self, call_volume: int, put_volume: int, call_baseline: Dict, put_baseline: Dict) -> float:
-        """Calculate volume anomaly score (0-3 points)."""
-        score = 0.0
+        """Calculate volume anomaly score (0-3 points) - take highest of call or put anomaly."""
+        call_score = 0.0
+        put_score = 0.0
         
-        # Call volume z-score
+        # Call volume z-score (can go up to 3.0 points)
         call_avg = call_baseline.get('avg_daily_volume', 0)
         call_std = call_baseline.get('stddev_daily_volume', 1)
         if call_std > 0 and call_avg > 0:
             call_z = abs(call_volume - call_avg) / call_std
-            score += min(call_z / 3.0, 1.5)  # Max 1.5 points for calls
+            call_score = min(call_z / 3.0, 3.0)  # Max 3.0 points for calls
         
-        # Put volume z-score  
+        # Put volume z-score (can go up to 3.0 points)
         put_avg = put_baseline.get('avg_daily_volume', 0)
         put_std = put_baseline.get('stddev_daily_volume', 1)
         if put_std > 0 and put_avg > 0:
             put_z = abs(put_volume - put_avg) / put_std
-            score += min(put_z / 3.0, 1.5)  # Max 1.5 points for puts
+            put_score = min(put_z / 3.0, 3.0)  # Max 3.0 points for puts
         
-        return min(score, 3.0)
+        # Take the highest anomaly (either call or put direction)
+        return max(call_score, put_score)
     
     def _calculate_otm_call_score_v2(self, contracts: List[Dict]) -> float:
         """Calculate out-of-the-money call concentration score (0-3 points)."""
@@ -509,6 +511,22 @@ class InsiderAnomalyDetector:
                 stored_count = 0
                 
                 for symbol, data in anomalies.items():
+                    # Calculate actual direction based on call/put ratio
+                    call_volume = data['details'].get('call_volume', 0)
+                    put_volume = data['details'].get('put_volume', 0) 
+                    total_volume = call_volume + put_volume
+                    
+                    if total_volume > 0:
+                        call_ratio = call_volume / total_volume
+                        if call_ratio >= 0.7:
+                            direction = 'call_heavy'
+                        elif call_ratio <= 0.3:
+                            direction = 'put_heavy'
+                        else:
+                            direction = 'mixed'
+                    else:
+                        direction = 'unknown'
+                    
                     # Store the symbol-level anomaly
                     cur.execute("""
                         INSERT INTO temp_anomaly (
@@ -529,7 +547,7 @@ class InsiderAnomalyDetector:
                     """, (
                         self.current_date,
                         symbol,
-                        'mixed',  # Direction is determined by the composite analysis
+                        direction,  # Now calculated based on actual call/put ratio
                         data['composite_score'],
                         data['anomaly_types'],
                         data['total_anomalies'],

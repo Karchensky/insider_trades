@@ -171,7 +171,7 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
         
         display_data.append({
             'Symbol': row['symbol'],
-            'Score': f"{row['score']:.1f}/10",
+            'Score': f"{float(row['score']):.1f}/10",
             'Key Indicators': key_indicators,
             'Insider Pattern': pattern,
             'Timestamp': row['as_of_timestamp'].strftime('%H:%M:%S') if pd.notna(row['as_of_timestamp']) else 'N/A'

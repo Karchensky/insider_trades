@@ -18,13 +18,15 @@ logger = logging.getLogger(__name__)
 
 class EmailNotifier:
     def __init__(self):
-        self.smtp_host = os.getenv('SMTP_HOST', 'smtp.gmail.com')
-        self.smtp_port = int(os.getenv('SMTP_PORT', '587'))
-        self.smtp_user = os.getenv('SMTP_USER', '')
-        self.smtp_pass = os.getenv('SMTP_PASS', '')
-        self.use_tls = os.getenv('SMTP_USE_TLS', 'true').lower() == 'true'
-        self.from_email = os.getenv('ALERT_EMAIL_FROM', self.smtp_user)
-        self.to_email = os.getenv('ALERT_EMAIL_TO', '')
+        # Match your .env template variables
+        self.smtp_host = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+        self.smtp_port = int(os.getenv('SMTP_PORT', '465'))
+        self.smtp_user = os.getenv('SENDER_EMAIL', '')
+        self.smtp_pass = os.getenv('EMAIL_PASSWORD', '')
+        self.use_tls = self.smtp_port == 587  # Use TLS for port 587, SSL for 465
+        self.use_ssl = self.smtp_port == 465  # Use SSL for port 465
+        self.from_email = os.getenv('SENDER_EMAIL', self.smtp_user)
+        self.to_email = os.getenv('RECIPIENT_EMAIL', '')
         self.min_score = float(os.getenv('ANOMALY_ALERT_MIN_SCORE', '7.0'))
         self.enabled = os.getenv('ANOMALY_EMAIL_ENABLED', 'true').lower() == 'true'
         
@@ -219,7 +221,7 @@ class EmailNotifier:
     def _send_email(self, subject: str, html_content: str):
         """Send the email using SMTP."""
         if not self.smtp_user or not self.smtp_pass or not self.to_email:
-            raise ValueError("Missing required email configuration (SMTP_USER, SMTP_PASS, ALERT_EMAIL_TO)")
+            raise ValueError("Missing required email configuration (SENDER_EMAIL, EMAIL_PASSWORD, RECIPIENT_EMAIL)")
         
         # Create message
         msg = MimeMultipart('alternative')
@@ -231,12 +233,19 @@ class EmailNotifier:
         html_part = MimeText(html_content, 'html')
         msg.attach(html_part)
         
-        # Send email
-        with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-            if self.use_tls:
-                server.starttls()
-            server.login(self.smtp_user, self.smtp_pass)
-            server.send_message(msg)
+        # Send email with proper SSL/TLS handling
+        if self.use_ssl:
+            # Use SMTP_SSL for port 465
+            with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port) as server:
+                server.login(self.smtp_user, self.smtp_pass)
+                server.send_message(msg)
+        else:
+            # Use SMTP with STARTTLS for port 587
+            with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
+                if self.use_tls:
+                    server.starttls()
+                server.login(self.smtp_user, self.smtp_pass)
+                server.send_message(msg)
     
     def test_connection(self) -> bool:
         """Test email configuration and connection."""
