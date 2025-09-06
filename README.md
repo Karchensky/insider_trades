@@ -62,7 +62,7 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
 - **Anomaly Storage**: `daily_anomaly_snapshot` (persistent anomaly records)
 - **Historical Tables**: `daily_stock_snapshot`, `daily_option_snapshot` (baseline data)
 - **Metadata Tables**: `option_contracts` (contract specifications)
-- **Views**: `anomaly_summary` (aggregated anomaly insights)
+- **Security**: Row Level Security (RLS) enabled with proper access controls
 
 ## Intraday Process Details
 
@@ -263,7 +263,7 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 #### `daily_anomaly_snapshot`
 
 - **Purpose**: High-conviction insider trading alerts
-- **Key Fields**: event_date, symbol, score, anomaly_types, details (JSONB), as_of_timestamp
+- **Key Fields**: event_date, symbol, total_score, volume_score, otm_score, directional_score, time_score, call_volume, put_volume, pattern_description, as_of_timestamp
 - **Retention**: 7 days (fixed)
 - **Update Frequency**: Every 15 minutes (during anomaly detection)
 
@@ -291,14 +291,6 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 - **Key Fields**: symbol, contract_ticker (composite primary key), contract_type, strike_price, expiration_date, exercise_style
 - **Retention**: Based on expiration_date (expires contracts older than retention period)
 - **Update Frequency**: Smart incremental (only new contracts daily)
-
-### Views
-
-#### `anomaly_summary`
-
-- **Purpose**: Aggregated view of anomaly detection results
-- **Security**: SECURITY INVOKER (respects user permissions)
-- **Data Source**: Joins daily_anomaly_snapshot with contract and stock data
 
 ## Configuration and Usage
 
@@ -336,13 +328,16 @@ python -c "from database.analysis.insider_anomaly_detection import InsiderAnomal
 **View Current High-Conviction Anomalies**:
 
 ```sql
-SELECT symbol, score, 
-       details->'volume_score' as volume_score,
-       details->'otm_call_score' as otm_score,
-       details->'directional_score' as directional_score,
-       details->'time_pressure_score' as time_score,
-       details->'call_volume' as call_volume,
-       details->'put_volume' as put_volume
+SELECT symbol, 
+       total_score,
+       volume_score,
+       otm_score,
+       directional_score,
+       time_score,
+       call_volume,
+       put_volume,
+       pattern_description,
+       z_score
 FROM daily_anomaly_snapshot 
 WHERE event_date = CURRENT_DATE AND total_score >= 7.0
 ORDER BY total_score DESC;

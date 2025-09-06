@@ -142,7 +142,7 @@ class EmailNotifier:
             key_indicators = f"""
                 • {call_multiplier:.1f}x normal call volume<br/>
                 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts<br/>
-                • OTM Score: {details.get('otm_call_score', 0):.1f}/3.0
+                • OTM Score: {details.get('otm_score', 0):.1f}/3.0
             """
             
             html += f"""
@@ -164,9 +164,9 @@ class EmailNotifier:
             details = data.get('details', {})
             
             volume_score = details.get('volume_score', 0)
-            otm_score = details.get('otm_call_score', 0)
+            otm_score = details.get('otm_score', 0)  # Fixed: use 'otm_score' not 'otm_call_score'
             directional_score = details.get('directional_score', 0)
-            time_score = details.get('time_pressure_score', 0)
+            time_score = details.get('time_score', 0)  # Fixed: use 'time_score' not 'time_pressure_score'
             
             call_volume = details.get('call_volume', 0)
             put_volume = details.get('put_volume', 0)

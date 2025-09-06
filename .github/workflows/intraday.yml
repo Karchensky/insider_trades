@@ -14,6 +14,11 @@ jobs:
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+      SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+      EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+      RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
 
     steps:
       - name: Checkout

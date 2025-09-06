@@ -158,16 +158,16 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
     # Process the data for display
     display_data = []
     for _, row in anomalies_df.iterrows():
-        # Extract key metrics directly from new table structure
-        call_volume = row.get('call_volume', 0)
-        put_volume = row.get('put_volume', 0)
-        total_volume = row.get('total_volume', call_volume + put_volume)
-        call_baseline = row.get('call_baseline_avg', 1)
-        call_multiplier = row.get('call_multiplier', 0)
+        # Extract key metrics directly from new table structure with type conversion
+        call_volume = int(float(row.get('call_volume', 0))) if row.get('call_volume') is not None else 0
+        put_volume = int(float(row.get('put_volume', 0))) if row.get('put_volume') is not None else 0
+        total_volume = int(float(row.get('total_volume', call_volume + put_volume))) if row.get('total_volume') is not None else (call_volume + put_volume)
+        call_baseline = float(row.get('call_baseline_avg', 1)) if row.get('call_baseline_avg') is not None else 1
+        call_multiplier = float(row.get('call_multiplier', 0)) if row.get('call_multiplier') is not None else 0
         
         # Calculate indicators
         call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
-        otm_score = row.get('otm_score', 0)
+        otm_score = float(row.get('otm_score', 0)) if row.get('otm_score') is not None else 0
         
         # Use pattern description from database or generate one
         pattern = row.get('pattern_description', 'Unusual trading pattern')
@@ -187,7 +187,7 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
         
         display_data.append({
             'Symbol': row['symbol'],
-            'Score': f"{float(row['score']):.1f}/10",
+            'Score': f"{float(row['total_score']):.1f}/10",
             'Key Indicators': key_indicators,
             'Insider Pattern': pattern,
             'Timestamp': row['as_of_timestamp'].strftime('%H:%M:%S') if pd.notna(row['as_of_timestamp']) else 'N/A'

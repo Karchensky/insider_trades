@@ -62,7 +62,7 @@ def main():
             symbol_anomaly = anomalies_df[anomalies_df['symbol'] == selected_symbol].iloc[0]
             # Build anomaly data from new table structure
             anomaly_data = {
-                'composite_score': float(symbol_anomaly['score']),
+                'composite_score': float(symbol_anomaly['total_score']),
                 'details': {
                     'volume_score': float(symbol_anomaly.get('volume_score', 0)),
                     'otm_call_score': float(symbol_anomaly.get('otm_score', 0)),  # Note: function expects 'otm_call_score'
