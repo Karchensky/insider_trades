@@ -248,8 +248,6 @@ class BulkStockDataLoader:
                 underlying_price = underlying.get('price')
 
                 # FALLBACK: If no underlying price in API response, we need to enrich later
-                # For now, we'll store NULL and enrich post-load
-
                 buf.write(
                     f"{f(as_of)}\t{symbol_val}\t{contract_ticker}\t"
                     f"{f(r.get('break_even_price'))}\t{f(details.get('strike_price'))}\t{f(r.get('implied_volatility'))}\t{f(r.get('open_interest'))}\t"

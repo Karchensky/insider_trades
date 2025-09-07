@@ -1,6 +1,6 @@
 # Insider Trading Detection System
 
-A comprehensive dual-process system for scraping options and stock data, then identifying potential insider trading activity through statistical anomaly detection.
+Scrapes polygon API to try & find insder trading patterns
 
 ## Project Structure
 
@@ -54,14 +54,14 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
 - **Stock Market Data**: Real-time and historical stock prices, volume, VWAP
 - **Options Data**: Real-time and historical options prices, volume, implied volatility, Greeks (delta, gamma, theta, vega)
 - **Options Contracts**: Contract specifications including type, strike price, expiration date, exercise style
-- **API Rate Limits**: 20 requests/second (paid tier)
+- **API Rate Limits**: 20 requests/second
 
 ### Database: PostgreSQL (Supabase)
 
-- **Temporary Tables**: `temp_stock`, `temp_option` (intraday data)
-- **Anomaly Storage**: `daily_anomaly_snapshot` (persistent anomaly records)
-- **Historical Tables**: `daily_stock_snapshot`, `daily_option_snapshot` (baseline data)
-- **Metadata Tables**: `option_contracts` (contract specifications)
+- **Temporary Tables**: `temp_stock`, `temp_option` (intraday data, stored with 1-day retention)
+- **Anomaly Storage**: `daily_anomaly_snapshot` (persistent anomaly records, stored with 30-day retention)
+- **Historical Tables**: `daily_stock_snapshot`, `daily_option_snapshot` (baseline data, stored with 30-day retention)
+- **Metadata Tables**: `option_contracts` (contract specifications, all active contracts)
 - **Security**: Row Level Security (RLS) enabled with proper access controls
 
 ## Intraday Process Details
@@ -119,7 +119,7 @@ python intraday_schedule.py --retention 1 --options-limit 50000
    - Preserves implied volatility, Greeks, and volume data for anomaly baselines
 3. **Options Contract Metadata Management**
 
-   - Smart incremental update of `option_contracts` table
+   - Incremental update of `option_contracts` table to capture all active options contractts
    - Compares `daily_option_snapshot` contracts with existing `option_contracts`
    - Only fetches metadata for genuinely new contracts (efficiency optimization)
    - Captures: contract_type (call/put), strike_price, expiration_date, exercise_style
@@ -127,7 +127,6 @@ python intraday_schedule.py --retention 1 --options-limit 50000
 
    - Truncates `temp_stock` and `temp_option` tables (intraday data no longer needed)
    - Preserves `daily_anomaly_snapshot` for historical analysis
-
 5. **Bulk Data Retention**
 
    - Removes `daily_stock_snapshot` and `daily_option_snapshot` data older than 30 days (configurable)
@@ -157,11 +156,9 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 
 - Analyzes call and put volume separately against symbol-specific baselines
 - Calculates Z-scores: `z = (current_volume - baseline_avg) / baseline_stddev`
-- Call Score: `min(call_z_score / 3.0, 1.5)` (max 1.5 points)
-- Put Score: `min(put_z_score / 3.0, 1.5)` (max 1.5 points)
-- Total: Call Score + Put Score (max 3.0 points)
-
-**Example**: ARES with 5,279 call volume vs 552 baseline avg = 9.6x multiplier = 1.8/3.0 points
+- Call Score: `min(call_z_score / 3.0, 1.5)` (max 3.0 points)
+- Put Score: `min(put_z_score / 3.0, 1.5)` (max 3.0 points)
+- Total: Max of call or put score
 
 #### 2. OTM Call Concentration Score (0-3 points)
 
@@ -191,8 +188,6 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
   - 80%+ puts = 1.5 points (bearish insider conviction)
   - Otherwise = 0.0 points
 
-**Example**: ARES with 90% call preference (5,279 calls / 5,865 total) = 2.0/2.0 points
-
 #### 4. Time Pressure Score (0-2 points)
 
 **Purpose**: Detect clustering in near-term expirations (insider urgency)
@@ -202,8 +197,6 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 - This Week Ratio: `volume_expiring_<=7_days / total_volume`
 - Short-term Ratio: `volume_expiring_<=21_days / total_volume`
 - Score: `(this_week_ratio * 1.2) + (short_term_ratio * 0.8)` (max 2.0 points)
-
-**Example**: ARES with moderate time clustering = 0.8/2.0 points
 
 ### Composite Scoring and Alerting
 
@@ -234,7 +227,6 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 - Symbols Processed: ~2,000+ active symbols
 - High-Conviction Alerts: Typically 0-5 symbols (top 0.1-0.2%)
 - Execution Time: ~60 seconds for full analysis
-- False Positive Reduction: 99.8% vs previous systems
 
 **Alert Quality Distribution**:
 
@@ -260,14 +252,7 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 - **Retention**: 1 day (configurable)
 - **Update Frequency**: Every 15 minutes
 
-#### `daily_anomaly_snapshot`
-
-- **Purpose**: High-conviction insider trading alerts
-- **Key Fields**: event_date, symbol, total_score, volume_score, otm_score, directional_score, time_score, call_volume, put_volume, pattern_description, as_of_timestamp
-- **Retention**: 7 days (fixed)
-- **Update Frequency**: Every 15 minutes (during anomaly detection)
-
-### Historical Tables (Baseline Data)
+### Aggregate Tables (Baseline Data, Anomalies)
 
 #### `daily_stock_snapshot`
 
@@ -283,6 +268,13 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 - **Retention**: 30 days (configurable)
 - **Update Frequency**: Once daily after market close
 
+#### `daily_anomaly_snapshot`
+
+- **Purpose**: High-conviction insider trading alerts
+- **Key Fields**: event_date, symbol, total_score, volume_score, otm_score, directional_score, time_score, call_volume, put_volume, pattern_description, as_of_timestamp
+- **Retention**: 7 days (fixed)
+- **Update Frequency**: Every 15 minutes (during anomaly detection)
+
 ### Metadata Tables
 
 #### `option_contracts`
@@ -290,7 +282,7 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 - **Purpose**: Options contract specifications and metadata
 - **Key Fields**: symbol, contract_ticker (composite primary key), contract_type, strike_price, expiration_date, exercise_style
 - **Retention**: Based on expiration_date (expires contracts older than retention period)
-- **Update Frequency**: Smart incremental (only new contracts daily)
+- **Update Frequency**:  Incremental (only new contracts daily)
 
 ## Configuration and Usage
 
@@ -301,57 +293,6 @@ DATABASE_URL=postgresql://user:pass@host:port/db
 POLYGON_API_KEY=your_polygon_api_key
 INTRADAY_RETENTION_DAYS=1
 DAILY_RETENTION_DAYS=30
-```
-
-### Manual Execution
-
-**Test Intraday Process**:
-
-```bash
-python intraday_schedule.py --retention 1 --options-limit 1000
-```
-
-**Test Daily Process**:
-
-```bash
-python daily_schedule.py --recent 1 --retention 30 --ticker-limit 100
-```
-
-**Run Anomaly Detection Standalone**:
-
-```bash
-python -c "from database.analysis.insider_anomaly_detection import InsiderAnomalyDetector; detector = InsiderAnomalyDetector(); results = detector.run_detection(); print(results)"
-```
-
-### Database Queries
-
-**View Current High-Conviction Anomalies**:
-
-```sql
-SELECT symbol, 
-       total_score,
-       volume_score,
-       otm_score,
-       directional_score,
-       time_score,
-       call_volume,
-       put_volume,
-       pattern_description,
-       z_score
-FROM daily_anomaly_snapshot 
-WHERE event_date = CURRENT_DATE AND total_score >= 7.0
-ORDER BY total_score DESC;
-```
-
-**Historical Anomaly Analysis**:
-
-```sql
-SELECT event_date, COUNT(*) as anomaly_count, 
-       AVG(total_score) as avg_score, MAX(total_score) as max_score
-FROM daily_anomaly_snapshot 
-WHERE total_score >= 7.0
-GROUP BY event_date 
-ORDER BY event_date DESC;
 ```
 
 ## Automated Scheduling

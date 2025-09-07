@@ -54,8 +54,8 @@ class PolygonDailyScraper:
         self.base_url = "https://api.polygon.io"
         self.session = requests.Session()
         
-        # Rate limiting (free tier: 5 requests per minute)
-        self.rate_limit_delay = 12  # seconds between requests
+        # Rate limiting
+        self.rate_limit_delay = 1  # seconds between requests
         self.max_retries = 3
         self.retry_delay = 5  # seconds
         

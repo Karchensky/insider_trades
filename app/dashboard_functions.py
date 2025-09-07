@@ -89,9 +89,8 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
         import psycopg2.extras
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # Get stock price history (note: daily_stock_snapshot has trading_volume, not volume)
+        # Get stock price history
         stock_query = """
-
             WITH history_daily AS (
             SELECT date, open, high, low, close, trading_volume as volume
             FROM daily_stock_snapshot
@@ -109,11 +108,9 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
             select * from history_daily
             UNION ALL
             select * from latest_temp_stock
-
-
-
         """
-        cur.execute(stock_query, (symbol, f'{days} days'))
+
+        cur.execute(stock_query, (symbol, f'{days} days', symbol))
         stock_rows = cur.fetchall()
         stock_df = pd.DataFrame([dict(row) for row in stock_rows]) if stock_rows else pd.DataFrame()
         
@@ -151,7 +148,7 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
           from latest_temp_option
           group by date, contract_type
         """
-        cur.execute(options_query, (symbol, f'{days} days'))
+        cur.execute(options_query, (symbol, f'{days} days', symbol))
         options_rows = cur.fetchall()
         options_df = pd.DataFrame([dict(row) for row in options_rows]) if options_rows else pd.DataFrame()
         
@@ -218,7 +215,7 @@ def get_anomaly_timeline(days: int = 7) -> pd.DataFrame:
         if not rows:
             return pd.DataFrame()
         
-        # Convert cursor results to DataFrame manually
+        # Convert cursor results to DataFrame
         data = []
         for row in rows:
             data.append(dict(row))
@@ -766,3 +763,153 @@ def create_options_heatmaps(symbol: str, target_date: date = None) -> None:
     fig.update_yaxes(title_text="Expiration Date")
     
     st.plotly_chart(fig, use_container_width=True)
+
+def get_contract_details(symbol: str, target_date: date = None) -> pd.DataFrame:
+    """Get detailed contract information for a symbol, ordered by volume."""
+    conn = db.connect()
+    try:
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        if target_date is None:
+            target_date = date.today()
+        
+        # Get contract details for the specified date
+        # First try daily_option_snapshot for historical data
+        query = """
+            SELECT 
+                oc.contract_ticker,
+                oc.contract_type,
+                oc.strike_price,
+                oc.expiration_date,
+                dos.volume,
+                dos.open_interest,
+                dos.close_price,
+                dos.implied_volatility,
+                dos.greeks_delta,
+                s.close as underlying_price,
+                dos.date
+            FROM daily_option_snapshot dos
+            INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
+            LEFT JOIN daily_stock_snapshot s ON dos.symbol = s.symbol AND dos.date = s.date
+            WHERE dos.symbol = %s
+              AND dos.date = %s
+              AND dos.volume > 0
+            ORDER BY dos.volume DESC
+        """
+        
+        cur.execute(query, (symbol, target_date))
+        rows = cur.fetchall()
+        
+        # If no historical data found, try temp tables for today's data
+        if not rows and target_date == date.today():
+            query = """
+                SELECT 
+                    oc.contract_ticker,
+                    oc.contract_type,
+                    oc.strike_price,
+                    oc.expiration_date,
+                    o.session_volume as volume,
+                    o.open_interest,
+                    o.session_close as close_price,
+                    o.implied_volatility,
+                    o.greeks_delta,
+                    COALESCE(s.day_close, s.day_vwap) as underlying_price,
+                    date(o.as_of_timestamp) as date
+                FROM temp_option o
+                INNER JOIN option_contracts oc ON o.symbol = oc.symbol AND o.contract_ticker = oc.contract_ticker
+                LEFT JOIN temp_stock s ON o.symbol = s.symbol
+                WHERE o.symbol = %s
+                  AND o.session_volume > 0
+                ORDER BY o.session_volume DESC
+            """
+            cur.execute(query, (symbol,))
+            rows = cur.fetchall()
+        
+        df = pd.DataFrame([dict(row) for row in rows]) if rows else pd.DataFrame()
+        
+        # Add calculated fields
+        if not df.empty:
+            df['days_to_expiry'] = (pd.to_datetime(df['expiration_date']) - pd.Timestamp.now()).dt.days
+            df['moneyness'] = df.apply(lambda row: 
+                'ITM' if (row['contract_type'] == 'call' and row['strike_price'] < row['underlying_price']) or 
+                         (row['contract_type'] == 'put' and row['strike_price'] > row['underlying_price'])
+                else 'OTM', axis=1)
+            df['volume_oi_ratio'] = df['volume'] / df['open_interest'].replace(0, 1)  # Avoid division by zero
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error fetching contract details: {e}")
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+def create_contracts_table(symbol: str, target_date: date = None) -> None:
+    """Create a detailed contracts table for the selected symbol."""
+    st.subheader(f"Contract Details for {symbol}")
+    
+    if target_date:
+        st.write(f"Data for: {target_date}")
+    
+    # Get contract data
+    contracts_df = get_contract_details(symbol, target_date)
+    
+    if contracts_df.empty:
+        st.info(f"No contract data available for {symbol}" + (f" on {target_date}" if target_date else ""))
+        return
+    
+    # Prepare display columns
+    display_df = contracts_df.copy()
+    
+    # Format columns for display
+    display_df['Strike'] = display_df['strike_price'].apply(lambda x: f"${x:.2f}")
+    display_df['Expiration'] = pd.to_datetime(display_df['expiration_date']).dt.strftime('%Y-%m-%d')
+    display_df['Days to Exp'] = display_df['days_to_expiry']
+    display_df['Volume'] = display_df['volume'].apply(lambda x: f"{x:,}")
+    display_df['Open Interest'] = display_df['open_interest'].apply(lambda x: f"{x:,}")
+    display_df['Price'] = display_df['close_price'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+    display_df['IV'] = display_df['implied_volatility'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "N/A")
+    display_df['Delta'] = display_df['greeks_delta'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "N/A")
+    display_df['V/OI Ratio'] = display_df['volume_oi_ratio'].apply(lambda x: f"{x:.2f}")
+    
+    # Select and reorder columns for display
+    display_columns = [
+        'contract_ticker', 'contract_type', 'Strike', 'Expiration', 'Days to Exp',
+        'moneyness', 'Volume', 'Open Interest', 'Price', 'IV', 'Delta', 'V/OI Ratio'
+    ]
+    
+    display_df = display_df[display_columns]
+    
+    # Rename columns for better display
+    display_df.columns = [
+        'Contract', 'Type', 'Strike', 'Expiration', 'Days to Exp',
+        'Moneyness', 'Volume', 'Open Interest', 'Price', 'IV', 'Delta', 'V/OI Ratio'
+    ]
+    
+    # Display the table
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        height=400
+    )
+    
+    # Add summary statistics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Contracts", len(contracts_df))
+    
+    with col2:
+        total_volume = contracts_df['volume'].sum()
+        st.metric("Total Volume", f"{total_volume:,}")
+    
+    with col3:
+        total_oi = contracts_df['open_interest'].sum()
+        st.metric("Total Open Interest", f"{total_oi:,}")
+    
+    with col4:
+        call_volume = contracts_df[contracts_df['contract_type'] == 'call']['volume'].sum()
+        put_volume = contracts_df[contracts_df['contract_type'] == 'put']['volume'].sum()
+        call_put_ratio = call_volume / put_volume if put_volume > 0 else float('inf')
+        st.metric("Call/Put Ratio", f"{call_put_ratio:.2f}")

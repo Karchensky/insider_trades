@@ -23,7 +23,7 @@ from database.core.connection import db
 from dashboard_functions import (
     get_current_anomalies, get_symbol_history, get_anomaly_timeline,
     create_anomaly_summary_table, create_symbol_analysis, create_anomaly_timeline_chart,
-    get_available_symbols, create_options_heatmaps
+    get_available_symbols, create_options_heatmaps, create_contracts_table
 )
 
 # Page configuration
@@ -96,6 +96,10 @@ def main():
                 }
                 create_symbol_analysis(selected_symbol, anomaly_data)
                 
+                # Add contracts table section
+                st.markdown("---")
+                create_contracts_table(selected_symbol, selected_date)
+                
                 # Add heatmaps section
                 st.markdown("---")
                 create_options_heatmaps(selected_symbol, selected_date)
@@ -143,10 +147,15 @@ def main():
                 if not anomalies_df.empty and selected_symbol in anomalies_df['symbol'].values:
                     st.info("This symbol has current anomalies! Check the Anomalies tab for detailed analysis.")
                 
+                # Show contracts table
+                create_contracts_table(selected_symbol, selected_date)
+                
                 # Show heatmaps
+                st.markdown("---")
                 create_options_heatmaps(selected_symbol, selected_date)
                 
                 # Show historical data
+                st.markdown("---")
                 history = get_symbol_history(selected_symbol)
                 if not history['stock'].empty:
                     st.subheader("Price History")
