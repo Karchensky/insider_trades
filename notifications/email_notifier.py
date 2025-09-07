@@ -26,9 +26,42 @@ class EmailNotifier:
         self.use_tls = self.smtp_port == 587  # Use TLS for port 587, SSL for 465
         self.use_ssl = self.smtp_port == 465  # Use SSL for port 465
         self.from_email = os.getenv('SENDER_EMAIL', self.smtp_user)
-        self.to_email = os.getenv('RECIPIENT_EMAIL', '')
+        self.to_emails = self._parse_recipient_emails(os.getenv('RECIPIENT_EMAIL', ''))
         self.min_score = float(os.getenv('ANOMALY_ALERT_MIN_SCORE', '7.0'))
         self.enabled = os.getenv('ANOMALY_EMAIL_ENABLED', 'true').lower() == 'true'
+    
+    def _parse_recipient_emails(self, recipient_string: str) -> List[str]:
+        """Parse recipient email string into a list of email addresses.
+        
+        Supports multiple formats:
+        - Single email: "user@example.com"
+        - Comma-separated: "user1@example.com,user2@example.com"
+        - Semicolon-separated: "user1@example.com;user2@example.com"
+        - Space-separated: "user1@example.com user2@example.com"
+        - Mixed separators: "user1@example.com, user2@example.com; user3@example.com"
+        """
+        if not recipient_string:
+            return []
+        
+        # Split by common separators and clean up
+        emails = []
+        for separator in [',', ';', '\n']:
+            if separator in recipient_string:
+                emails.extend(recipient_string.split(separator))
+                break
+        else:
+            # If no separators found, try splitting by spaces
+            emails = recipient_string.split()
+        
+        # Clean up emails (strip whitespace, filter empty strings)
+        cleaned_emails = []
+        for email in emails:
+            email = email.strip()
+            if email and '@' in email:  # Basic email validation
+                cleaned_emails.append(email)
+        
+        logger.info(f"Parsed {len(cleaned_emails)} recipient email(s): {cleaned_emails}")
+        return cleaned_emails
         
     def send_anomaly_alert(self, anomalies: Dict[str, Dict]) -> bool:
         """Send email alert for detected anomalies."""
@@ -219,15 +252,15 @@ class EmailNotifier:
         return html
     
     def _send_email(self, subject: str, html_content: str):
-        """Send the email using SMTP."""
-        if not self.smtp_user or not self.smtp_pass or not self.to_email:
+        """Send the email using SMTP to multiple recipients."""
+        if not self.smtp_user or not self.smtp_pass or not self.to_emails:
             raise ValueError("Missing required email configuration (SENDER_EMAIL, EMAIL_PASSWORD, RECIPIENT_EMAIL)")
         
         # Create message
         msg = MimeMultipart('alternative')
         msg['Subject'] = subject
         msg['From'] = self.from_email
-        msg['To'] = self.to_email
+        msg['To'] = ', '.join(self.to_emails)  # Join multiple recipients for display
         
         # Add HTML content
         html_part = MimeText(html_content, 'html')
@@ -238,14 +271,14 @@ class EmailNotifier:
             # Use SMTP_SSL for port 465
             with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port) as server:
                 server.login(self.smtp_user, self.smtp_pass)
-                server.send_message(msg)
+                server.send_message(msg, to_addrs=self.to_emails)  # Send to all recipients
         else:
             # Use SMTP with STARTTLS for port 587
             with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
                 if self.use_tls:
                     server.starttls()
                 server.login(self.smtp_user, self.smtp_pass)
-                server.send_message(msg)
+                server.send_message(msg, to_addrs=self.to_emails)  # Send to all recipients
     
     def test_connection(self) -> bool:
         """Test email configuration and connection."""

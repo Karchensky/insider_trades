@@ -115,7 +115,6 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
             logger.error(f"[daily_option_snapshot] {ds} analytics update failed: {ce}")
         cur += _td(days=1)
 
-    # Note: Anomaly events are now kept in daily_anomaly_snapshot table for ongoing analysis
     logger.info("[anomaly_retention] Keeping daily_anomaly_snapshot data for ongoing analysis")
     
     # Clean up old daily_anomaly_snapshot data using retention

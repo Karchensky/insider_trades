@@ -50,7 +50,7 @@ class InsiderAnomalyDetector:
                 logger.warning("No baseline statistics available for comparison")
                 return {'success': True, 'anomalies_detected': 0, 'message': 'No baseline data available'}
             
-            # NEW APPROACH: High-conviction insider trading detection
+            # High-conviction insider trading detection
             # Focus on statistical anomalies, not absolute volumes
             high_conviction_anomalies = self._detect_high_conviction_insider_activity(intraday_data, baseline_stats)
             
@@ -189,7 +189,6 @@ class InsiderAnomalyDetector:
                 logger.info(f"Baseline calculation: {actual_start_date} to {actual_end_date}")
                 
                 # Calculate comprehensive baseline statistics from historical data
-                # Now using option_contracts table for accurate contract metadata
                 cur.execute("""
                     WITH daily_volumes AS (
                         SELECT 
