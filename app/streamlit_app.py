@@ -19,12 +19,18 @@ from typing import Dict, List, Any, Optional
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database.core.connection import db
-from dashboard_functions import (
-    get_current_anomalies, get_symbol_history, get_anomaly_timeline,
-    create_anomaly_summary_table, create_symbol_analysis, create_anomaly_timeline_chart,
-    get_available_symbols, create_options_heatmaps, create_contracts_table
-)
+# Check for required environment variables
+try:
+    from database.core.connection import db
+    from dashboard_functions import (
+        get_current_anomalies, get_symbol_history, get_anomaly_timeline,
+        create_anomaly_summary_table, create_symbol_analysis, create_anomaly_timeline_chart,
+        get_available_symbols, create_options_heatmaps, create_contracts_table
+    )
+    DATABASE_AVAILABLE = True
+except Exception as e:
+    st.error(f"Database connection error: {e}")
+    DATABASE_AVAILABLE = False
 
 # Page configuration
 st.set_page_config(
@@ -38,6 +44,27 @@ def main():
     """Main Streamlit application."""
     st.title("Insider Trading Detection Dashboard")
     st.markdown("**High-Conviction Statistical Anomaly Analysis**")
+    
+    # Check if database is available
+    if not DATABASE_AVAILABLE:
+        st.error("""
+        **Database Connection Error**
+        
+        The application cannot connect to the database. This could be due to:
+        
+        1. **Missing Environment Variables**: The `SUPABASE_DB_URL` environment variable is not set
+        2. **Network Issues**: Unable to reach the database server
+        3. **Authentication Problems**: Invalid database credentials
+        
+        **For Streamlit.io Deployment:**
+        - Make sure to set the `SUPABASE_DB_URL` secret in your Streamlit.io app settings
+        - Go to your Streamlit.io app → Settings → Secrets and add your database URL
+        
+        **For Local Development:**
+        - Ensure your `.env` file contains the correct `SUPABASE_DB_URL`
+        - Verify your database credentials are correct
+        """)
+        return
     
     # Sidebar Configuration
     st.sidebar.header("Navigation")
