@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional, Tuple, Iterable
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import execute_values
+import pytz
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,6 +22,17 @@ from database.core.connection import db
 from database.core.stock_data import StockDataManager
 
 logger = logging.getLogger(__name__)
+
+# EST timezone for consistent timestamp handling
+EST_TZ = pytz.timezone('US/Eastern')
+
+def get_est_now():
+    """Get current datetime in EST timezone"""
+    return datetime.now(EST_TZ)
+
+def get_est_date():
+    """Get current date in EST timezone"""
+    return datetime.now(EST_TZ).date()
 
 
 class BulkStockDataLoader:
@@ -221,7 +233,7 @@ class BulkStockDataLoader:
                     continue
                 contract_ticker = r.get('ticker')
                 # as_of: prefer r.last_updated else now
-                as_of = to_ts(r.get('last_updated')) or datetime.now(timezone.utc).isoformat()
+                as_of = to_ts(r.get('last_updated')) or get_est_now().isoformat()
 
                 details = r.get('details') or {}
                 greeks = r.get('greeks') or {}

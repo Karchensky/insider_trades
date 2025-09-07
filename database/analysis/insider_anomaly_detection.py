@@ -19,6 +19,7 @@ import time
 import json
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Any
+import pytz
 from database.core.connection import db
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,9 @@ logger = logging.getLogger(__name__)
 class InsiderAnomalyDetector:
     def __init__(self, baseline_days: int = 30):
         self.baseline_days = baseline_days
-        self.current_date = date.today()
+        # Use EST timezone for all date/time operations
+        self.est_tz = pytz.timezone('US/Eastern')
+        self.current_date = datetime.now(self.est_tz).date()
     
     def run_detection(self) -> Dict[str, Any]:
         """Run high-conviction insider trading anomaly detection (1-10 scoring)."""
@@ -484,7 +487,7 @@ class InsiderAnomalyDetector:
         otm_ratio = otm_call_volume / total_call_volume
         short_term_ratio = short_term_otm_volume / total_call_volume
         
-        # Scoring: Heavy weight on short-term OTM calls (classic insider pattern)
+        # Scoring: Heavy weight on short-term OTM calls
         score = (otm_ratio * 1.5) + (short_term_ratio * 1.5)  # Max 3.0
         return min(score, 3.0)
     
@@ -650,7 +653,7 @@ class InsiderAnomalyDetector:
                         details.get('otm_call_percentage', 0),
                         details.get('short_term_percentage', 0),
                         call_put_ratio,
-                        datetime.now()
+                        datetime.now(self.est_tz)
                     ))
                     stored_count += 1
                 

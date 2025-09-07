@@ -7,9 +7,11 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import numpy as np
 import sys
 import os
 from typing import Dict, List, Any
+from datetime import date, datetime, timedelta
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,10 +22,21 @@ def get_current_anomalies() -> pd.DataFrame:
     """Get current high-conviction anomalies from daily_anomaly_snapshot table."""
     conn = db.connect()
     try:
+        # Use cursor with RealDictCursor for reliable data access
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # First check if we have any data
+        cur.execute("SELECT COUNT(*) as count FROM daily_anomaly_snapshot WHERE total_score >= 7.0 AND event_date >= CURRENT_DATE - INTERVAL '7 days'")
+        count = cur.fetchone()['count']
+        
+        if count == 0:
+            return pd.DataFrame()
+            
         query = """
             SELECT 
                 symbol,
-                total_score as score,
+                total_score,
                 volume_score,
                 otm_score,
                 directional_score,
@@ -49,8 +62,20 @@ def get_current_anomalies() -> pd.DataFrame:
             ORDER BY total_score DESC, as_of_timestamp DESC
         """
         
-        df = pd.read_sql_query(query, conn)
+        cur.execute(query)
+        rows = cur.fetchall()
+        
+        if not rows:
+            return pd.DataFrame()
+        
+        # Convert cursor results to DataFrame manually (more reliable than pandas read_sql_query)
+        data = []
+        for row in rows:
+            data.append(dict(row))
+        
+        df = pd.DataFrame(data)
         return df
+        
     except Exception as e:
         st.error(f"Error fetching anomalies: {e}")
         return pd.DataFrame()
@@ -61,18 +86,40 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
     """Get historical data for a specific symbol."""
     conn = db.connect()
     try:
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
         # Get stock price history (note: daily_stock_snapshot has trading_volume, not volume)
         stock_query = """
+
+            WITH history_daily AS (
             SELECT date, open, high, low, close, trading_volume as volume
             FROM daily_stock_snapshot
             WHERE symbol = %s
-              AND date >= CURRENT_DATE - INTERVAL '%s days'
-            ORDER BY date ASC
+              AND date >= CURRENT_DATE - INTERVAL %s
+            ORDER BY date ASC )
+
+            , latest_temp_stock AS (
+            SELECT DISTINCT ON (symbol) 
+                date(as_of_timestamp) as date, day_open as open, day_high as high, day_low as low, day_close as close, day_volume as volume
+            FROM temp_stock
+            WHERE symbol = %s
+            ORDER BY symbol, as_of_timestamp DESC )
+
+            select * from history_daily
+            UNION ALL
+            select * from latest_temp_stock
+
+
+
         """
-        stock_df = pd.read_sql_query(stock_query, conn, params=[symbol, days])
+        cur.execute(stock_query, (symbol, f'{days} days'))
+        stock_rows = cur.fetchall()
+        stock_df = pd.DataFrame([dict(row) for row in stock_rows]) if stock_rows else pd.DataFrame()
         
         # Get options activity history
         options_query = """
+            WITH history_daily AS ( 
             SELECT 
                 dos.date,
                 oc.contract_type,
@@ -82,11 +129,31 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
             FROM daily_option_snapshot dos
             INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
             WHERE dos.symbol = %s
-              AND dos.date >= CURRENT_DATE - INTERVAL '%s days'
+              AND dos.date >= CURRENT_DATE - INTERVAL %s
             GROUP BY dos.date, oc.contract_type
-            ORDER BY dos.date ASC, oc.contract_type
+            ORDER BY dos.date ASC, oc.contract_type )
+
+            , latest_temp_option AS (
+                -- Get the most recent option data for each contract
+                SELECT DISTINCT ON (symbol, contract_ticker) 
+                    date(as_of_timestamp) as date, symbol, contract_ticker, session_volume, contract_type, implied_volatility
+                FROM temp_option
+                WHERE symbol = %s
+                ORDER BY symbol, contract_ticker, as_of_timestamp DESC  )
+
+            select * from history_daily
+            UNION ALL
+          select date,
+                contract_type,
+                SUM(session_volume) as total_volume,
+                COUNT(*) as contract_count,
+                AVG(implied_volatility) as avg_iv
+          from latest_temp_option
+          group by date, contract_type
         """
-        options_df = pd.read_sql_query(options_query, conn, params=[symbol, days])
+        cur.execute(options_query, (symbol, f'{days} days'))
+        options_rows = cur.fetchall()
+        options_df = pd.DataFrame([dict(row) for row in options_rows]) if options_rows else pd.DataFrame()
         
         # Get today's intraday activity
         intraday_query = """
@@ -95,6 +162,7 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
                 oc.contract_type,
                 oc.strike_price,
                 oc.expiration_date,
+                o.open_interest,
                 o.session_volume,
                 o.session_close,
                 o.implied_volatility,
@@ -108,7 +176,9 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
               AND o.session_volume > 0
             ORDER BY o.session_volume DESC
         """
-        intraday_df = pd.read_sql_query(intraday_query, conn, params=[symbol])
+        cur.execute(intraday_query, (symbol,))
+        intraday_rows = cur.fetchall()
+        intraday_df = pd.DataFrame([dict(row) for row in intraday_rows]) if intraday_rows else pd.DataFrame()
         
         return {
             'stock': stock_df,
@@ -125,6 +195,9 @@ def get_anomaly_timeline(days: int = 7) -> pd.DataFrame:
     """Get timeline of anomalies over the past N days."""
     conn = db.connect()
     try:
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
         query = """
             SELECT 
                 event_date,
@@ -133,13 +206,24 @@ def get_anomaly_timeline(days: int = 7) -> pd.DataFrame:
                 MAX(total_score) as max_score,
                 ARRAY_AGG(symbol ORDER BY total_score DESC) as symbols
             FROM daily_anomaly_snapshot
-            WHERE event_date >= CURRENT_DATE - INTERVAL '%s days'
+            WHERE event_date >= CURRENT_DATE - INTERVAL %s
               AND total_score >= 7.0
             GROUP BY event_date
             ORDER BY event_date DESC
         """
         
-        df = pd.read_sql_query(query, conn, params=[days])
+        cur.execute(query, (f'{days} days',))
+        rows = cur.fetchall()
+        
+        if not rows:
+            return pd.DataFrame()
+        
+        # Convert cursor results to DataFrame manually
+        data = []
+        for row in rows:
+            data.append(dict(row))
+        
+        df = pd.DataFrame(data)
         return df
     except Exception as e:
         st.error(f"Error fetching anomaly timeline: {e}")
@@ -158,40 +242,68 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
     # Process the data for display
     display_data = []
     for _, row in anomalies_df.iterrows():
-        # Extract key metrics directly from new table structure with type conversion
-        call_volume = int(float(row.get('call_volume', 0))) if row.get('call_volume') is not None else 0
-        put_volume = int(float(row.get('put_volume', 0))) if row.get('put_volume') is not None else 0
-        total_volume = int(float(row.get('total_volume', call_volume + put_volume))) if row.get('total_volume') is not None else (call_volume + put_volume)
-        call_baseline = float(row.get('call_baseline_avg', 1)) if row.get('call_baseline_avg') is not None else 1
-        call_multiplier = float(row.get('call_multiplier', 0)) if row.get('call_multiplier') is not None else 0
-        
-        # Calculate indicators
-        call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
-        otm_score = float(row.get('otm_score', 0)) if row.get('otm_score') is not None else 0
-        
-        # Use pattern description from database or generate one
-        pattern = row.get('pattern_description', 'Unusual trading pattern')
-        if not pattern or pattern == 'Unusual trading pattern':
-            if call_percentage >= 80:
-                pattern = "Strong bullish insider activity"
-            elif call_percentage <= 20:
-                pattern = "Strong bearish insider activity"
-            else:
-                pattern = "Mixed directional positioning"
-        
-        # Format key indicators using new data structure
-        key_indicators = f"""• {call_multiplier:.1f}x normal call volume
+        try:
+            # Extract key metrics directly from new table structure with type conversion
+            # Handle both string and numeric types safely
+            def safe_numeric(value, default=0, as_int=False):
+                if value is None or value == '' or str(value).lower() in ['none', 'null']:
+                    return default
+                try:
+                    if as_int:
+                        return int(float(value))
+                    else:
+                        return float(value)
+                except (ValueError, TypeError):
+                    return default
+            
+            call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
+            put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
+            total_volume = safe_numeric(row.get('total_volume', call_volume + put_volume), as_int=True)
+            call_baseline = safe_numeric(row.get('call_baseline_avg', 1), default=1)
+            call_multiplier = safe_numeric(row.get('call_multiplier', 0))
+            
+            # Calculate indicators
+            call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
+            otm_score = safe_numeric(row.get('otm_score', 0))
+            
+            # Use pattern description from database or generate one
+            pattern = row.get('pattern_description', 'Unusual trading pattern')
+            if not pattern or pattern == 'Unusual trading pattern':
+                if call_percentage >= 80:
+                    pattern = "Strong bullish insider activity"
+                elif call_percentage <= 20:
+                    pattern = "Strong bearish insider activity"
+                else:
+                    pattern = "Mixed directional positioning"
+            
+            # Format key indicators using new data structure
+            z_score = safe_numeric(row.get('z_score', 0))
+            total_score = safe_numeric(row.get('total_score', 0))
+            
+            key_indicators = f"""• {call_multiplier:.1f}x normal call volume
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/3.0
-• Z-Score: {row.get('z_score', 0):.1f}"""
-        
-        display_data.append({
-            'Symbol': row['symbol'],
-            'Score': f"{float(row['total_score']):.1f}/10",
-            'Key Indicators': key_indicators,
-            'Insider Pattern': pattern,
-            'Timestamp': row['as_of_timestamp'].strftime('%H:%M:%S') if pd.notna(row['as_of_timestamp']) else 'N/A'
-        })
+• Z-Score: {z_score:.1f}"""
+            
+            # Handle timestamp safely
+            timestamp_str = 'N/A'
+            if pd.notna(row.get('as_of_timestamp')):
+                try:
+                    timestamp_str = row['as_of_timestamp'].strftime('%H:%M:%S')
+                except (AttributeError, ValueError):
+                    timestamp_str = str(row['as_of_timestamp'])
+            
+            display_data.append({
+                'Symbol': str(row.get('symbol', 'Unknown')),
+                'Score': f"{total_score:.1f}/10",
+                'Key Indicators': key_indicators,
+                'Insider Pattern': pattern,
+                'Timestamp': timestamp_str
+            })
+            
+        except Exception as e:
+            st.warning(f"Error processing row for symbol {row.get('symbol', 'Unknown')}: {e}")
+            continue
     
     # Create DataFrame for display
     display_df = pd.DataFrame(display_data)
@@ -345,13 +457,31 @@ def create_options_activity_chart(options_df: pd.DataFrame, symbol: str) -> None
     
     st.subheader(f"{symbol} Options Activity Timeline")
     
-    # Pivot the data for easier plotting
-    pivot_df = options_df.pivot_table(
-        index='date', 
-        columns='contract_type', 
-        values='total_volume', 
-        fill_value=0
-    ).reset_index()
+    # Validate data before pivoting
+    required_columns = ['date', 'contract_type', 'total_volume']
+    if not all(col in options_df.columns for col in required_columns):
+        st.error(f"Missing required columns for chart. Available: {list(options_df.columns)}")
+        return
+    
+    # Check for string data that looks like column headers
+    if not options_df.empty:
+        sample_volume = str(options_df.iloc[0]['total_volume'])
+        if 'total_volume' in sample_volume.lower():
+            st.error("Data contains column headers instead of actual values. Chart cannot be displayed.")
+            return
+    
+    try:
+        # Pivot the data for easier plotting
+        pivot_df = options_df.pivot_table(
+            index='date', 
+            columns='contract_type', 
+            values='total_volume', 
+            fill_value=0,
+            aggfunc='sum'  # Explicit aggregation function
+        ).reset_index()
+    except Exception as e:
+        st.error(f"Error creating pivot table: {e}")
+        return
     
     fig = go.Figure()
     
@@ -463,5 +593,176 @@ def create_anomaly_timeline_chart(timeline_df: pd.DataFrame) -> None:
     fig.update_layout(height=400, showlegend=False)
     fig.update_yaxes(title_text="Count", row=1, col=1)
     fig.update_yaxes(title_text="Score", row=2, col=1)
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+def get_options_heatmap_data(symbol: str, target_date: date = None) -> pd.DataFrame:
+    """Get options data for heatmap visualization by strike and expiration."""
+    conn = db.connect()
+    try:
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        if target_date is None:
+            target_date = date.today()
+        
+        # Get options data for the specified date
+        # First try daily_option_snapshot for historical data
+        query = """
+            SELECT 
+                oc.strike_price,
+                oc.expiration_date,
+                oc.contract_type,
+                dos.volume,
+                dos.open_interest,
+                dos.close_price as option_price,
+                dos.implied_volatility,
+                s.close as underlying_price
+            FROM daily_option_snapshot dos
+            INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
+            LEFT JOIN daily_stock_snapshot s ON dos.symbol = s.symbol AND dos.date = s.date
+            WHERE dos.symbol = %s
+              AND dos.date = %s
+              AND dos.volume > 0
+            ORDER BY oc.expiration_date, oc.strike_price
+        """
+        
+        cur.execute(query, (symbol, target_date))
+        rows = cur.fetchall()
+        
+        # If no historical data found, try temp tables for today's data
+        if not rows and target_date == date.today():
+            query = """
+                SELECT 
+                    oc.strike_price,
+                    oc.expiration_date,
+                    oc.contract_type,
+                    o.session_volume as volume,
+                    o.open_interest,
+                    o.session_close as option_price,
+                    o.implied_volatility,
+                    COALESCE(s.day_close, s.day_vwap) as underlying_price
+                FROM temp_option o
+                INNER JOIN option_contracts oc ON o.symbol = oc.symbol AND o.contract_ticker = oc.contract_ticker
+                LEFT JOIN temp_stock s ON o.symbol = s.symbol
+                WHERE o.symbol = %s
+                  AND o.session_volume > 0
+                ORDER BY oc.expiration_date, oc.strike_price
+            """
+            cur.execute(query, (symbol,))
+            rows = cur.fetchall()
+        
+        df = pd.DataFrame([dict(row) for row in rows]) if rows else pd.DataFrame()
+        return df
+        
+    except Exception as e:
+        st.error(f"Error fetching heatmap data: {e}")
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+def get_available_symbols() -> List[str]:
+    """Get list of all available symbols for search."""
+    conn = db.connect()
+    try:
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Get symbols from multiple tables
+        query = """
+            SELECT DISTINCT symbol FROM (
+                SELECT symbol FROM daily_stock_snapshot
+                UNION
+                SELECT symbol FROM temp_stock
+                UNION 
+                SELECT symbol FROM daily_option_snapshot
+                UNION
+                SELECT symbol FROM temp_option
+            ) symbols
+            ORDER BY symbol
+        """
+        
+        cur.execute(query)
+        rows = cur.fetchall()
+        return [row['symbol'] for row in rows]
+        
+    except Exception as e:
+        st.error(f"Error fetching available symbols: {e}")
+        return []
+    finally:
+        conn.close()
+
+def create_options_heatmaps(symbol: str, target_date: date = None) -> None:
+    """Create 2x2 grid of options heatmaps: call/put volume and open interest by strike/expiration."""
+    st.subheader(f"Options Heatmaps for {symbol}")
+    
+    if target_date:
+        st.write(f"Data for: {target_date}")
+    
+    # Get options data
+    options_data = get_options_heatmap_data(symbol, target_date)
+    
+    if options_data.empty:
+        st.info(f"No options data available for {symbol}" + (f" on {target_date}" if target_date else ""))
+        return
+    
+    # Get underlying price for reference line
+    underlying_price = float(options_data['underlying_price'].iloc[0]) if not options_data.empty and options_data['underlying_price'].iloc[0] is not None else None
+    
+    # Create 2x2 subplot grid
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=("Call Volume", "Put Volume", "Call Open Interest", "Put Open Interest"),
+        specs=[[{"type": "heatmap"}, {"type": "heatmap"}],
+               [{"type": "heatmap"}, {"type": "heatmap"}]]
+    )
+    
+    # Separate call and put data
+    calls_data = options_data[options_data['contract_type'] == 'call']
+    puts_data = options_data[options_data['contract_type'] == 'put']
+    
+    # Create heatmaps for each quadrant
+    heatmaps = [
+        (calls_data, 'volume', 'Call Volume', 1, 1),
+        (puts_data, 'volume', 'Put Volume', 1, 2),
+        (calls_data, 'open_interest', 'Call Open Interest', 2, 1),
+        (puts_data, 'open_interest', 'Put Open Interest', 2, 2)
+    ]
+    
+    for data, value_col, title, row, col in heatmaps:
+        if not data.empty and value_col in data.columns:
+            # Create pivot table for heatmap
+            pivot_data = data.pivot_table(
+                index='expiration_date',
+                columns='strike_price', 
+                values=value_col,
+                fill_value=0,
+                aggfunc='sum'
+            )
+            
+            if not pivot_data.empty:
+                # Create heatmap
+                fig.add_trace(
+                    go.Heatmap(
+                        z=pivot_data.values,
+                        x=[str(x) for x in pivot_data.columns],
+                        y=[str(y) for y in pivot_data.index],
+                        colorscale='bupu',
+                        showscale=(col == 2),  # Only show colorbar on right side
+                        name=title
+                    ),
+                    row=row, col=col
+                )
+    
+    # Update layout
+    fig.update_layout(
+        height=1400,
+        title_text=f"Options Activity Heatmaps - {symbol}",
+        showlegend=False
+    )
+    
+    # Update axes labels
+    fig.update_xaxes(title_text="Strike Price")
+    fig.update_yaxes(title_text="Expiration Date")
     
     st.plotly_chart(fig, use_container_width=True)

@@ -34,7 +34,11 @@ class DatabaseConnection:
                     self.db_url,
                     cursor_factory=RealDictCursor
                 )
-                logger.info("Database connection established")
+                # Set session timezone to EST for all operations
+                with self.connection.cursor() as cur:
+                    cur.execute("SET timezone = 'US/Eastern'")
+                    self.connection.commit()
+                logger.info("Database connection established with EST timezone")
             return self.connection
         except psycopg2.Error as e:
             logger.error(f"Failed to connect to database: {e}")

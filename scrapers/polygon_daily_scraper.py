@@ -13,6 +13,7 @@ import requests
 import argparse
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
+import pytz
 from time import sleep
 
 # Add parent directory to path for imports
@@ -69,7 +70,7 @@ class PolygonDailyScraper:
             List of holiday dates in YYYY-MM-DD format
         """
         # Basic U.S. market holidays (you can expand this)
-        current_year = datetime.now().year
+        current_year = datetime.now(pytz.timezone('US/Eastern')).year
         holidays = [
             f"{current_year}-01-01",  # New Year's Day
             f"{current_year}-06-19",  # Juneteenth
@@ -140,7 +141,7 @@ class PolygonDailyScraper:
                     logger.info(f"Successfully fetched {results_count} stock records for {market_date}")
                     
                     # Add metadata for tracking
-                    data['fetch_timestamp'] = datetime.now().isoformat()
+                    data['fetch_timestamp'] = datetime.now(pytz.timezone('US/Eastern')).isoformat()
                     data['market_date'] = market_date
                     
                     return data
