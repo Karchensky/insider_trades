@@ -73,19 +73,19 @@ class EmailNotifier:
             logger.info("No anomalies to report")
             return True
             
-        # Filter anomalies by minimum score
+        # Filter anomalies by minimum score and volume
         high_conviction_anomalies = {
             symbol: data for symbol, data in anomalies.items()
-            if data.get('composite_score', 0) >= self.min_score
+            if data.get('composite_score', 0) >= self.min_score and data.get('total_volume', 0) > 500
         }
         
         if not high_conviction_anomalies:
-            logger.info(f"No anomalies above threshold {self.min_score}")
+            logger.info(f"No anomalies above threshold {self.min_score} with volume > 500")
             return True
             
         try:
             # Create email content
-            subject = f"INSIDER TRADING ALERT: {len(high_conviction_anomalies)} High-Conviction Anomalies Detected"
+            subject = f"INSIDER TRADING ALERT: {len(high_conviction_anomalies)} High-Conviction Anomalies (Score≥{self.min_score}, Volume>500)"
             html_content = self._create_email_content(high_conviction_anomalies)
             
             # Send email
@@ -134,7 +134,7 @@ class EmailNotifier:
             
             <div class="summary">
                 <h2>Alert Summary</h2>
-                <p><strong>{len(sorted_anomalies)} symbols</strong> detected with high-conviction insider trading patterns (score ≥ {self.min_score}/10.0)</p>
+                <p><strong>{len(sorted_anomalies)} symbols</strong> detected with high-conviction insider trading patterns (score ≥ {self.min_score}/10.0, volume > 500)</p>
                 <p>These anomalies represent statistical outliers that warrant immediate investigation.</p>
                 <p><strong>View Interactive Dashboard:</strong> <a href="https://bk-insidertrades.streamlit.app" style="color: #1f77b4; text-decoration: none; font-weight: bold;">https://bk-insidertrades.streamlit.app</a></p>
             </div>
