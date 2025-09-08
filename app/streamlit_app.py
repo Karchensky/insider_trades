@@ -8,7 +8,6 @@ insider trading anomalies detected by the system.
 
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sys
@@ -35,7 +34,6 @@ except Exception as e:
 # Page configuration
 st.set_page_config(
     page_title="Insider Trading Detection Dashboard",
-    page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )

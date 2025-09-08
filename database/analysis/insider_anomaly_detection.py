@@ -6,7 +6,7 @@ This system identifies potential insider trading activity using statistical anal
 of options trading patterns against 30-day baselines.
 
 Scoring System (1-10 scale):
-- Volume Anomaly (0-3): Z-score analysis vs baseline
+- Volume Anomaly (0-3): High volume z-score analysis vs baseline (only rewards above-average volume)
 - OTM Call Concentration (0-3): Short-term out-of-money calls  
 - Directional Bias (0-2): Strong call/put preference
 - Time Pressure (0-2): Near-term expiration clustering
@@ -16,7 +16,6 @@ Alert Threshold: Score >= 7.0 (high-conviction only)
 
 import logging
 import time
-import json
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Any
 import pytz
@@ -54,15 +53,12 @@ class InsiderAnomalyDetector:
             # Focus on statistical anomalies, not absolute volumes
             high_conviction_anomalies = self._detect_high_conviction_insider_activity(intraday_data, baseline_stats)
             
-            # Store results in database
-            stored_count = self._store_anomalies(high_conviction_anomalies)
-            
             execution_time = time.time() - start_time
-            logger.info(f"High-conviction anomaly detection completed in {execution_time:.2f}s. Detected {stored_count} high-conviction anomalies")
+            logger.info(f"High-conviction anomaly detection completed in {execution_time:.2f}s. Detected {len(high_conviction_anomalies)} high-conviction anomalies")
             
             return {
                 'success': True,
-                'anomalies_detected': stored_count,
+                'anomalies_detected': len(high_conviction_anomalies),
                 'execution_time': execution_time,
                 'contracts_analyzed': len(intraday_data),
                 'symbols_with_anomalies': len(high_conviction_anomalies),
@@ -327,13 +323,11 @@ class InsiderAnomalyDetector:
         
         for symbol, contracts in symbol_data.items():
             # Calculate symbol-level metrics
-            call_volume = sum(c['session_volume'] for c in contracts if c['contract_type'] == 'call')
-            put_volume = sum(c['session_volume'] for c in contracts if c['contract_type'] == 'put')
+            call_volume = int(sum(c['session_volume'] for c in contracts if c['contract_type'] == 'call'))
+            put_volume = int(sum(c['session_volume'] for c in contracts if c['contract_type'] == 'put'))
             total_volume = call_volume + put_volume
             
-            # Skip low-activity symbols
-            if total_volume < 500:  # Minimum volume threshold
-                continue
+            # Process all symbols regardless of volume
             
             # Get baseline data for this symbol
             call_key = f"{symbol}_call"
@@ -351,26 +345,26 @@ class InsiderAnomalyDetector:
             time_pressure_score = self._calculate_time_pressure_score_v2(contracts)
             
             # Calculate additional metrics for enhanced storage
-            call_baseline_avg = call_baseline.get('avg_daily_volume', 0)
-            put_baseline_avg = put_baseline.get('avg_daily_volume', 0)
+            call_baseline_avg = float(call_baseline.get('avg_daily_volume', 0))
+            put_baseline_avg = float(put_baseline.get('avg_daily_volume', 0))
             
             # Calculate z-scores for pattern analysis
-            call_std = call_baseline.get('stddev_daily_volume', 1)
-            put_std = put_baseline.get('stddev_daily_volume', 1)
+            call_std = float(call_baseline.get('stddev_daily_volume', 1))
+            put_std = float(put_baseline.get('stddev_daily_volume', 1))
             call_z_score = abs(call_volume - call_baseline_avg) / call_std if call_std > 0 else 0
             put_z_score = abs(put_volume - put_baseline_avg) / put_std if put_std > 0 else 0
             max_z_score = max(call_z_score, put_z_score)
             
             # Calculate OTM and short-term percentages
             call_contracts = [c for c in contracts if c['contract_type'] == 'call']
-            total_call_volume = sum(c['session_volume'] for c in call_contracts)
+            total_call_volume = int(sum(c['session_volume'] for c in call_contracts))
             
             otm_call_volume = 0
             short_term_volume = 0
             today = date.today()
             
             for contract in contracts:
-                volume = contract['session_volume']
+                volume = int(contract['session_volume'])
                 
                 # Check if OTM call (strike > current price * 1.05)
                 if (contract['contract_type'] == 'call' and 
@@ -429,23 +423,23 @@ class InsiderAnomalyDetector:
         return high_conviction_symbols
     
     def _calculate_volume_anomaly_score_v2(self, call_volume: int, put_volume: int, call_baseline: Dict, put_baseline: Dict) -> float:
-        """Calculate volume anomaly score (0-3 points) - take highest of call or put anomaly."""
+        """Calculate volume anomaly score (0-3 points) - only reward HIGH volume anomalies."""
         call_score = 0.0
         put_score = 0.0
         
-        # Call volume z-score (can go up to 3.0 points)
-        call_avg = call_baseline.get('avg_daily_volume', 0)
-        call_std = call_baseline.get('stddev_daily_volume', 1)
-        if call_std > 0 and call_avg > 0:
-            call_z = abs(call_volume - call_avg) / call_std
-            call_score = min(call_z / 3.0, 3.0)  # Max 3.0 points for calls
+        # Call volume z-score (only reward HIGH volume, not low volume)
+        call_avg = float(call_baseline.get('avg_daily_volume', 0))
+        call_std = float(call_baseline.get('stddev_daily_volume', 1))
+        if call_std > 0 and call_avg > 0 and call_volume > call_avg:
+            call_z = (call_volume - call_avg) / call_std  # Only positive z-scores (high volume)
+            call_score = min(call_z, 3.0)  # Max 3.0 points at 3 standard deviations
         
-        # Put volume z-score (can go up to 3.0 points)
-        put_avg = put_baseline.get('avg_daily_volume', 0)
-        put_std = put_baseline.get('stddev_daily_volume', 1)
-        if put_std > 0 and put_avg > 0:
-            put_z = abs(put_volume - put_avg) / put_std
-            put_score = min(put_z / 3.0, 3.0)  # Max 3.0 points for puts
+        # Put volume z-score (only reward HIGH volume, not low volume)
+        put_avg = float(put_baseline.get('avg_daily_volume', 0))
+        put_std = float(put_baseline.get('stddev_daily_volume', 1))
+        if put_std > 0 and put_avg > 0 and put_volume > put_avg:
+            put_z = (put_volume - put_avg) / put_std  # Only positive z-scores (high volume)
+            put_score = min(put_z, 3.0)  # Max 3.0 points at 3 standard deviations
         
         # Take the highest anomaly (either call or put direction)
         return max(call_score, put_score)
@@ -495,8 +489,8 @@ class InsiderAnomalyDetector:
         if total_call_volume == 0:
             return 0.0
         
-        otm_ratio = otm_call_volume / total_call_volume
-        short_term_ratio = short_term_otm_volume / total_call_volume
+        otm_ratio = float(otm_call_volume) / float(total_call_volume)
+        short_term_ratio = float(short_term_otm_volume) / float(total_call_volume)
         
         # Scoring: Heavy weight on short-term OTM calls
         score = (otm_ratio * 1.5) + (short_term_ratio * 1.5)  # Max 3.0
@@ -530,7 +524,7 @@ class InsiderAnomalyDetector:
         total_volume = 0
         
         for contract in contracts:
-            volume = contract['session_volume']
+            volume = int(contract['session_volume'])
             exp_date = contract['expiration_date']
             
             if isinstance(exp_date, str):
@@ -547,242 +541,14 @@ class InsiderAnomalyDetector:
         if total_volume == 0:
             return 0.0
         
-        this_week_ratio = exp_volumes.get('this_week', 0) / total_volume
-        short_term_ratio = exp_volumes.get('short_term', 0) / total_volume
+        this_week_ratio = float(exp_volumes.get('this_week', 0)) / float(total_volume)
+        short_term_ratio = float(exp_volumes.get('short_term', 0)) / float(total_volume)
         
         # High scores for concentration in near-term expirations
         score = (this_week_ratio * 1.2) + (short_term_ratio * 0.8)  # Max 2.0
         return min(score, 2.0)
 
-    def _store_anomalies(self, anomalies: Dict[str, Dict]) -> int:
-        """Store detected anomalies in the daily_anomaly_snapshot table."""
-        if not anomalies:
-            return 0
-        
-        conn = db.connect()
-        try:
-            with conn.cursor() as cur:
-                stored_count = 0
-                
-                for symbol, data in anomalies.items():
-                    details = data['details']
-                    
-                    # Extract volume data
-                    call_volume = details.get('call_volume', 0)
-                    put_volume = details.get('put_volume', 0)
-                    total_volume = call_volume + put_volume
-                    
-                    # Extract baseline data
-                    call_baseline_avg = details.get('call_baseline_avg', 0)
-                    put_baseline_avg = details.get('put_baseline_avg', 0)
-                    
-                    # Calculate multipliers
-                    call_multiplier = call_volume / call_baseline_avg if call_baseline_avg > 0 else 0
-                    put_multiplier = put_volume / put_baseline_avg if put_baseline_avg > 0 else 0
-                    
-                    # Calculate direction and ratios
-                    if total_volume > 0:
-                        call_ratio = call_volume / total_volume
-                        call_put_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
-                        if call_ratio >= 0.7:
-                            direction = 'call_heavy'
-                        elif call_ratio <= 0.3:
-                            direction = 'put_heavy'
-                        else:
-                            direction = 'mixed'
-                    else:
-                        call_ratio = 0
-                        call_put_ratio = 0
-                        direction = 'unknown'
-                    
-                    # Generate pattern description
-                    pattern_parts = []
-                    if call_multiplier > 5:
-                        pattern_parts.append(f"{call_multiplier:.1f}x call volume")
-                    if call_ratio >= 0.9:
-                        pattern_parts.append(f"{call_ratio*100:.0f}% calls")
-                    elif call_ratio >= 0.8:
-                        pattern_parts.append(f"Strong call bias ({call_ratio*100:.0f}%)")
-                    if details.get('otm_call_percentage', 0) > 50:
-                        pattern_parts.append("Heavy OTM calls")
-                    if details.get('short_term_percentage', 0) > 50:
-                        pattern_parts.append("Short-term focus")
-                    
-                    pattern_description = ", ".join(pattern_parts) if pattern_parts else "Unusual trading pattern"
-                    
-                    # Store the enhanced anomaly data
-                    cur.execute("""
-                        INSERT INTO daily_anomaly_snapshot (
-                            event_date, symbol, total_score, 
-                            volume_score, otm_score, directional_score, time_score,
-                            call_volume, put_volume, total_volume,
-                            call_baseline_avg, put_baseline_avg, call_multiplier, put_multiplier,
-                            direction, pattern_description, z_score,
-                            otm_call_percentage, short_term_percentage, call_put_ratio,
-                            as_of_timestamp
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (event_date, symbol) 
-                        DO UPDATE SET
-                            total_score = EXCLUDED.total_score,
-                            volume_score = EXCLUDED.volume_score,
-                            otm_score = EXCLUDED.otm_score,
-                            directional_score = EXCLUDED.directional_score,
-                            time_score = EXCLUDED.time_score,
-                            call_volume = EXCLUDED.call_volume,
-                            put_volume = EXCLUDED.put_volume,
-                            total_volume = EXCLUDED.total_volume,
-                            call_baseline_avg = EXCLUDED.call_baseline_avg,
-                            put_baseline_avg = EXCLUDED.put_baseline_avg,
-                            call_multiplier = EXCLUDED.call_multiplier,
-                            put_multiplier = EXCLUDED.put_multiplier,
-                            direction = EXCLUDED.direction,
-                            pattern_description = EXCLUDED.pattern_description,
-                            z_score = EXCLUDED.z_score,
-                            otm_call_percentage = EXCLUDED.otm_call_percentage,
-                            short_term_percentage = EXCLUDED.short_term_percentage,
-                            call_put_ratio = EXCLUDED.call_put_ratio,
-                            as_of_timestamp = EXCLUDED.as_of_timestamp,
-                            updated_at = CURRENT_TIMESTAMP
-                    """, (
-                        self.current_date,
-                        symbol,
-                        data['composite_score'],
-                        details.get('volume_score', 0),
-                        details.get('otm_score', 0),
-                        details.get('directional_score', 0),
-                        details.get('time_score', 0),
-                        call_volume,
-                        put_volume,
-                        total_volume,
-                        call_baseline_avg,
-                        put_baseline_avg,
-                        call_multiplier,
-                        put_multiplier,
-                        direction,
-                        pattern_description,
-                        details.get('z_score', 0),
-                        details.get('otm_call_percentage', 0),
-                        details.get('short_term_percentage', 0),
-                        call_put_ratio,
-                        datetime.now(self.est_tz)
-                    ))
-                    stored_count += 1
-                
-                conn.commit()
-                return stored_count
-                
-        except Exception as e:
-            logger.error(f"Failed to store anomalies: {e}")
-            conn.rollback()
-            return 0
-        finally:
-            conn.close()
 
-    def _store_single_anomaly(self, anomaly_data: Dict) -> bool:
-        """Store a single anomaly record in the database."""
-        conn = db.connect()
-        try:
-            with conn.cursor() as cur:
-                details = anomaly_data['details']
-                
-                # Extract volume data
-                call_volume = details.get('call_volume', 0)
-                put_volume = details.get('put_volume', 0)
-                total_volume = call_volume + put_volume
-                
-                # Extract baseline data
-                call_baseline_avg = details.get('call_baseline_avg', 0)
-                put_baseline_avg = details.get('put_baseline_avg', 0)
-                
-                # Calculate multipliers
-                call_multiplier = call_volume / call_baseline_avg if call_baseline_avg > 0 else 0
-                put_multiplier = put_volume / put_baseline_avg if put_baseline_avg > 0 else 0
-                
-                # Determine direction
-                if call_volume > put_volume * 2:
-                    direction = 'call_heavy'
-                elif put_volume > call_volume * 2:
-                    direction = 'put_heavy'
-                else:
-                    direction = 'mixed'
-                
-                # Create pattern description
-                pattern_description = f"{call_multiplier:.1f}x call volume, {call_volume/(total_volume)*100:.0f}% calls"
-                if details.get('otm_call_percentage', 0) > 80:
-                    pattern_description += ", Heavy OTM calls"
-                if details.get('short_term_percentage', 0) > 70:
-                    pattern_description += ", Short-term focus"
-                
-                # Calculate call/put ratio (cap at 9999.9999 to avoid database overflow)
-                call_put_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
-                
-                # Insert the anomaly record
-                cur.execute("""
-                    INSERT INTO daily_anomaly_snapshot (
-                        event_date, symbol, total_score, volume_score, otm_score, 
-                        directional_score, time_score, call_volume, put_volume, 
-                        total_volume, call_baseline_avg, put_baseline_avg, 
-                        call_multiplier, put_multiplier, direction, pattern_description,
-                        z_score, otm_call_percentage, short_term_percentage, call_put_ratio,
-                        as_of_timestamp
-                    ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                    )
-                    ON CONFLICT (event_date, symbol) 
-                    DO UPDATE SET
-                        total_score = EXCLUDED.total_score,
-                        volume_score = EXCLUDED.volume_score,
-                        otm_score = EXCLUDED.otm_score,
-                        directional_score = EXCLUDED.directional_score,
-                        time_score = EXCLUDED.time_score,
-                        call_volume = EXCLUDED.call_volume,
-                        put_volume = EXCLUDED.put_volume,
-                        total_volume = EXCLUDED.total_volume,
-                        call_baseline_avg = EXCLUDED.call_baseline_avg,
-                        put_baseline_avg = EXCLUDED.put_baseline_avg,
-                        call_multiplier = EXCLUDED.call_multiplier,
-                        put_multiplier = EXCLUDED.put_multiplier,
-                        direction = EXCLUDED.direction,
-                        pattern_description = EXCLUDED.pattern_description,
-                        z_score = EXCLUDED.z_score,
-                        otm_call_percentage = EXCLUDED.otm_call_percentage,
-                        short_term_percentage = EXCLUDED.short_term_percentage,
-                        call_put_ratio = EXCLUDED.call_put_ratio,
-                        as_of_timestamp = EXCLUDED.as_of_timestamp,
-                        updated_at = CURRENT_TIMESTAMP
-                """, (
-                    self.current_date,
-                    anomaly_data['symbol'],
-                    anomaly_data['composite_score'],
-                    details.get('volume_score', 0),
-                    details.get('otm_score', 0),
-                    details.get('directional_score', 0),
-                    details.get('time_score', 0),
-                    call_volume,
-                    put_volume,
-                    total_volume,
-                    call_baseline_avg,
-                    put_baseline_avg,
-                    call_multiplier,
-                    put_multiplier,
-                    direction,
-                    pattern_description,
-                    details.get('z_score', 0),
-                    details.get('otm_call_percentage', 0),
-                    details.get('short_term_percentage', 0),
-                    call_put_ratio,
-                    datetime.now(self.est_tz)
-                ))
-                
-                conn.commit()
-                return True
-                
-        except Exception as e:
-            logger.error(f"Failed to store single anomaly for {anomaly_data.get('symbol', 'Unknown')}: {e}")
-            conn.rollback()
-            return False
-        finally:
-            conn.close()
 
     def _store_anomalies_bulk(self, anomalies_data: List[Dict]) -> int:
         """Store multiple anomaly records in bulk using execute_values for efficiency."""
