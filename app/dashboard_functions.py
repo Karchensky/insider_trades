@@ -37,6 +37,7 @@ def get_current_anomalies() -> pd.DataFrame:
                 symbol,
                 total_score,
                 volume_score,
+                open_interest_score,
                 otm_score,
                 directional_score,
                 time_score,
@@ -53,11 +54,11 @@ def get_current_anomalies() -> pd.DataFrame:
                 otm_call_percentage,
                 short_term_percentage,
                 call_put_ratio,
+                open_interest_change,
                 as_of_timestamp,
                 event_date
             FROM daily_anomaly_snapshot
-            WHERE event_date >= CURRENT_DATE - INTERVAL '7 days'
-              AND total_score >= 7.0
+            WHERE total_score >= 7.0
               AND total_volume >= 500
             ORDER BY total_score DESC, as_of_timestamp DESC
         """
@@ -276,10 +277,13 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
             # Format key indicators using new data structure
             z_score = safe_numeric(row.get('z_score', 0))
             total_score = safe_numeric(row.get('total_score', 0))
+            open_interest_score = safe_numeric(row.get('open_interest_score', 0))
+            open_interest_change = safe_numeric(row.get('open_interest_change', 0))
             
             key_indicators = f"""• {call_multiplier:.1f}x normal call volume
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
-• OTM Score: {otm_score:.1f}/3.0
+• OTM Score: {otm_score:.1f}/2.0
+• Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
 • Z-Score: {z_score:.1f}"""
             
             # Handle timestamp safely
@@ -393,9 +397,13 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                 z_score = safe_numeric(row.get('z_score', 0))
                 total_score = safe_numeric(row.get('total_score', 0))
                 
+                open_interest_score = safe_numeric(row.get('open_interest_score', 0))
+                open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                
                 key_indicators = f"""• {call_multiplier:.1f}x normal call volume
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
-• OTM Score: {otm_score:.1f}/3.0
+• OTM Score: {otm_score:.1f}/2.0
+• Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
 • Z-Score: {z_score:.1f}"""
                 
                 # Handle timestamp safely
