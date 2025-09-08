@@ -195,9 +195,9 @@ def run_once(include_otc: bool,
                             # Get the detected anomalies from the detector
                             anomalies = anomaly_results.get('anomalies', {})
                             if send_anomaly_notification(anomalies):
-                                logger.info(f"[notifications] ✓ Email alert sent for {anomaly_count} anomalies")
+                                logger.info(f"[notifications] ✓ Email alert sent for anomalies")
                             else:
-                                logger.warning("[notifications] ✗ Email alert failed to send")
+                                logger.info("[notifications] ✓ No email sent - no anomalies met volume threshold")
                         except Exception as ne:
                             logger.error(f"[notifications] ✗ Email notification error: {ne}")
                     else:

@@ -81,7 +81,7 @@ class EmailNotifier:
         
         if not high_conviction_anomalies:
             logger.info(f"No anomalies detected: No symbols scored >= {self.min_score} with volume > 500")
-            return True
+            return False  # Return False to indicate no email was sent
             
         try:
             # Create email content

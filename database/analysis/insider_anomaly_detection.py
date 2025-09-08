@@ -396,6 +396,7 @@ class InsiderAnomalyDetector:
             anomaly_data = {
                 'symbol': symbol,
                 'composite_score': round(composite_score, 1),
+                'total_volume': total_volume,  # Add total_volume at top level for email filtering
                 'anomaly_types': ['insider_activity'] if composite_score >= 7.0 else ['low_score_activity'],
                 'total_anomalies': 1,
                 'details': {
