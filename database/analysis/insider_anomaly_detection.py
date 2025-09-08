@@ -323,6 +323,7 @@ class InsiderAnomalyDetector:
             symbol_data[symbol].append(contract)
         
         high_conviction_symbols = {}
+        all_anomaly_data = []  # Collect all anomaly data for bulk processing
         
         for symbol, contracts in symbol_data.items():
             # Calculate symbol-level metrics
@@ -412,12 +413,17 @@ class InsiderAnomalyDetector:
                 'max_individual_score': composite_score
             }
             
-            # Store in database regardless of score
-            self._store_single_anomaly(anomaly_data)
+            # Collect all anomaly data for bulk processing
+            all_anomaly_data.append(anomaly_data)
             
             # Only flag high-conviction cases (score >= 7.0) for notifications
             if composite_score >= 7.0:
                 high_conviction_symbols[symbol] = anomaly_data
+        
+        # Bulk store all anomaly data
+        if all_anomaly_data:
+            stored_count = self._store_anomalies_bulk(all_anomaly_data)
+            logger.info(f"Bulk stored {stored_count} anomaly records in database")
         
         logger.info(f"Anomaly analysis complete: {len(high_conviction_symbols)} symbols scored >= 7.0 (high-conviction) out of {len(symbol_data)} analyzed. All scores stored in database.")
         return high_conviction_symbols
@@ -577,7 +583,7 @@ class InsiderAnomalyDetector:
                     # Calculate direction and ratios
                     if total_volume > 0:
                         call_ratio = call_volume / total_volume
-                        call_put_ratio = call_volume / put_volume if put_volume > 0 else float('inf')
+                        call_put_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
                         if call_ratio >= 0.7:
                             direction = 'call_heavy'
                         elif call_ratio <= 0.3:
@@ -707,8 +713,8 @@ class InsiderAnomalyDetector:
                 if details.get('short_term_percentage', 0) > 70:
                     pattern_description += ", Short-term focus"
                 
-                # Calculate call/put ratio
-                call_put_ratio = call_volume / put_volume if put_volume > 0 else float('inf')
+                # Calculate call/put ratio (cap at 9999.9999 to avoid database overflow)
+                call_put_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
                 
                 # Insert the anomaly record
                 cur.execute("""
@@ -775,6 +781,126 @@ class InsiderAnomalyDetector:
             logger.error(f"Failed to store single anomaly for {anomaly_data.get('symbol', 'Unknown')}: {e}")
             conn.rollback()
             return False
+        finally:
+            conn.close()
+
+    def _store_anomalies_bulk(self, anomalies_data: List[Dict]) -> int:
+        """Store multiple anomaly records in bulk using execute_values for efficiency."""
+        if not anomalies_data:
+            return 0
+        
+        conn = db.connect()
+        try:
+            with conn.cursor() as cur:
+                # Prepare data for bulk insert
+                bulk_data = []
+                
+                for anomaly_data in anomalies_data:
+                    details = anomaly_data['details']
+                    
+                    # Extract volume data
+                    call_volume = details.get('call_volume', 0)
+                    put_volume = details.get('put_volume', 0)
+                    total_volume = call_volume + put_volume
+                    
+                    # Extract baseline data
+                    call_baseline_avg = details.get('call_baseline_avg', 0)
+                    put_baseline_avg = details.get('put_baseline_avg', 0)
+                    
+                    # Calculate multipliers
+                    call_multiplier = call_volume / call_baseline_avg if call_baseline_avg > 0 else 0
+                    put_multiplier = put_volume / put_baseline_avg if put_baseline_avg > 0 else 0
+                    
+                    # Determine direction
+                    if call_volume > put_volume * 2:
+                        direction = 'call_heavy'
+                    elif put_volume > call_volume * 2:
+                        direction = 'put_heavy'
+                    else:
+                        direction = 'mixed'
+                    
+                    # Create pattern description
+                    pattern_description = f"{call_multiplier:.1f}x call volume, {call_volume/(total_volume)*100:.0f}% calls"
+                    if details.get('otm_call_percentage', 0) > 80:
+                        pattern_description += ", Heavy OTM calls"
+                    if details.get('short_term_percentage', 0) > 70:
+                        pattern_description += ", Short-term focus"
+                    
+                    # Calculate call/put ratio (cap at 9999.9999 to avoid database overflow)
+                    call_put_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
+                    
+                    # Prepare row data
+                    row_data = (
+                        self.current_date,
+                        anomaly_data['symbol'],
+                        anomaly_data['composite_score'],
+                        details.get('volume_score', 0),
+                        details.get('otm_score', 0),
+                        details.get('directional_score', 0),
+                        details.get('time_score', 0),
+                        call_volume,
+                        put_volume,
+                        total_volume,
+                        call_baseline_avg,
+                        put_baseline_avg,
+                        call_multiplier,
+                        put_multiplier,
+                        direction,
+                        pattern_description,
+                        details.get('z_score', 0),
+                        details.get('otm_call_percentage', 0),
+                        details.get('short_term_percentage', 0),
+                        call_put_ratio,
+                        datetime.now(self.est_tz)
+                    )
+                    bulk_data.append(row_data)
+                
+                # Bulk insert with upsert logic
+                from psycopg2.extras import execute_values
+                
+                insert_query = """
+                    INSERT INTO daily_anomaly_snapshot (
+                        event_date, symbol, total_score, volume_score, otm_score, 
+                        directional_score, time_score, call_volume, put_volume, 
+                        total_volume, call_baseline_avg, put_baseline_avg, 
+                        call_multiplier, put_multiplier, direction, pattern_description,
+                        z_score, otm_call_percentage, short_term_percentage, call_put_ratio,
+                        as_of_timestamp
+                    ) VALUES %s
+                    ON CONFLICT (event_date, symbol)
+                    DO UPDATE SET
+                        total_score = EXCLUDED.total_score,
+                        volume_score = EXCLUDED.volume_score,
+                        otm_score = EXCLUDED.otm_score,
+                        directional_score = EXCLUDED.directional_score,
+                        time_score = EXCLUDED.time_score,
+                        call_volume = EXCLUDED.call_volume,
+                        put_volume = EXCLUDED.put_volume,
+                        total_volume = EXCLUDED.total_volume,
+                        call_baseline_avg = EXCLUDED.call_baseline_avg,
+                        put_baseline_avg = EXCLUDED.put_baseline_avg,
+                        call_multiplier = EXCLUDED.call_multiplier,
+                        put_multiplier = EXCLUDED.put_multiplier,
+                        direction = EXCLUDED.direction,
+                        pattern_description = EXCLUDED.pattern_description,
+                        z_score = EXCLUDED.z_score,
+                        otm_call_percentage = EXCLUDED.otm_call_percentage,
+                        short_term_percentage = EXCLUDED.short_term_percentage,
+                        call_put_ratio = EXCLUDED.call_put_ratio,
+                        as_of_timestamp = EXCLUDED.as_of_timestamp,
+                        updated_at = CURRENT_TIMESTAMP
+                """
+                
+                execute_values(cur, insert_query, bulk_data, template=None, page_size=1000)
+                conn.commit()
+                
+                logger.info(f"Bulk inserted/updated {len(bulk_data)} anomaly records")
+                return len(bulk_data)
+                
+        except Exception as e:
+            logger.error(f"Failed to bulk store anomalies: {e}")
+            conn.rollback()
+            return 0
         finally:
             conn.close()
 
