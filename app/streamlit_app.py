@@ -24,7 +24,7 @@ try:
     from database.core.connection import db
     from dashboard_functions import (
         get_current_anomalies, get_symbol_history, get_anomaly_timeline,
-        create_anomaly_summary_table, create_symbol_analysis, create_anomaly_timeline_chart,
+        create_anomaly_summary_table, create_anomaly_summary_by_date, create_symbol_analysis, create_anomaly_timeline_chart,
         get_available_symbols, create_options_heatmaps, create_contracts_table
     )
     DATABASE_AVAILABLE = True
@@ -98,7 +98,7 @@ def main():
             
             # Main content
             if selected_symbol == 'Overview':
-                create_anomaly_summary_table(anomalies_df)
+                create_anomaly_summary_by_date(anomalies_df)
                 timeline_df = get_anomaly_timeline()
                 create_anomaly_timeline_chart(timeline_df)
             else:
