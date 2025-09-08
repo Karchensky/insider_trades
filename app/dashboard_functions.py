@@ -58,7 +58,7 @@ def get_current_anomalies() -> pd.DataFrame:
             FROM daily_anomaly_snapshot
             WHERE event_date >= CURRENT_DATE - INTERVAL '7 days'
               AND total_score >= 7.0
-              AND volume >= 500
+              AND total_volume >= 500
             ORDER BY total_score DESC, as_of_timestamp DESC
         """
         
