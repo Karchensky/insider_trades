@@ -60,7 +60,7 @@ class EmailNotifier:
             if email and '@' in email:  # Basic email validation
                 cleaned_emails.append(email)
         
-        logger.info(f"Parsed {len(cleaned_emails)} recipient email(s): {cleaned_emails}")
+        logger.info(f"Parsed {len(cleaned_emails)} recipient email(s)")
         return cleaned_emails
         
     def send_anomaly_alert(self, anomalies: Dict[str, Dict]) -> bool:
