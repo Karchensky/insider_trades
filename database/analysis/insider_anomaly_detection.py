@@ -6,7 +6,7 @@ This system identifies potential insider trading activity using statistical anal
 of options trading patterns against 30-day baselines.
 
 Scoring System (1-10 scale):
-- Volume Anomaly (0-3): Z-score analysis vs baseline
+- Volume Anomaly (0-3): High volume z-score analysis vs baseline (only rewards above-average volume)
 - OTM Call Concentration (0-3): Short-term out-of-money calls  
 - Directional Bias (0-2): Strong call/put preference
 - Time Pressure (0-2): Near-term expiration clustering
@@ -423,23 +423,23 @@ class InsiderAnomalyDetector:
         return high_conviction_symbols
     
     def _calculate_volume_anomaly_score_v2(self, call_volume: int, put_volume: int, call_baseline: Dict, put_baseline: Dict) -> float:
-        """Calculate volume anomaly score (0-3 points) - take highest of call or put anomaly."""
+        """Calculate volume anomaly score (0-3 points) - only reward HIGH volume anomalies."""
         call_score = 0.0
         put_score = 0.0
         
-        # Call volume z-score (can go up to 3.0 points)
+        # Call volume z-score (only reward HIGH volume, not low volume)
         call_avg = float(call_baseline.get('avg_daily_volume', 0))
         call_std = float(call_baseline.get('stddev_daily_volume', 1))
-        if call_std > 0 and call_avg > 0:
-            call_z = abs(call_volume - call_avg) / call_std
-            call_score = min(call_z / 3.0, 3.0)  # Max 3.0 points for calls
+        if call_std > 0 and call_avg > 0 and call_volume > call_avg:
+            call_z = (call_volume - call_avg) / call_std  # Only positive z-scores (high volume)
+            call_score = min(call_z, 3.0)  # Max 3.0 points at 3 standard deviations
         
-        # Put volume z-score (can go up to 3.0 points)
+        # Put volume z-score (only reward HIGH volume, not low volume)
         put_avg = float(put_baseline.get('avg_daily_volume', 0))
         put_std = float(put_baseline.get('stddev_daily_volume', 1))
-        if put_std > 0 and put_avg > 0:
-            put_z = abs(put_volume - put_avg) / put_std
-            put_score = min(put_z / 3.0, 3.0)  # Max 3.0 points for puts
+        if put_std > 0 and put_avg > 0 and put_volume > put_avg:
+            put_z = (put_volume - put_avg) / put_std  # Only positive z-scores (high volume)
+            put_score = min(put_z, 3.0)  # Max 3.0 points at 3 standard deviations
         
         # Take the highest anomaly (either call or put direction)
         return max(call_score, put_score)
