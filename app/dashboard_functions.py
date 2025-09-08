@@ -27,7 +27,7 @@ def get_current_anomalies() -> pd.DataFrame:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         # First check if we have any data
-        cur.execute("SELECT COUNT(*) as count FROM daily_anomaly_snapshot WHERE total_score >= 7.0 AND event_date >= CURRENT_DATE - INTERVAL '7 days'")
+        cur.execute("SELECT COUNT(*) as count FROM daily_anomaly_snapshot WHERE total_score >= 7.0")
         count = cur.fetchone()['count']
         
         if count == 0:
@@ -154,7 +154,7 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
         
         # Get today's intraday activity
         intraday_query = """
-            SELECT 
+            SELECT DISTINCT ON (o.symbol, o.contract_ticker)  
                 o.contract_ticker,
                 oc.contract_type,
                 oc.strike_price,
@@ -171,7 +171,7 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
             LEFT JOIN temp_stock s ON o.symbol = s.symbol
             WHERE o.symbol = %s
               AND o.session_volume > 0
-            ORDER BY o.session_volume DESC
+            ORDER BY o.symbol, o.contract_ticker, o.as_of_timestamp DESC, o.session_volume DESC
         """
         cur.execute(intraday_query, (symbol,))
         intraday_rows = cur.fetchall()
@@ -312,6 +312,125 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
         hide_index=True
     )
 
+def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
+    """Create anomaly summary tables grouped by date, ordered by date descending."""
+    if anomalies_df.empty:
+        st.info("No high-conviction anomalies detected in the past 7 days.")
+        return
+    
+    st.subheader("High-Conviction Insider Trading Alerts")
+    
+    # Group anomalies by date
+    anomalies_by_date = {}
+    for _, row in anomalies_df.iterrows():
+        try:
+            # Extract date from event_date or as_of_timestamp
+            date_key = None
+            if pd.notna(row.get('event_date')):
+                date_key = pd.to_datetime(row['event_date']).date()
+            elif pd.notna(row.get('as_of_timestamp')):
+                date_key = pd.to_datetime(row['as_of_timestamp']).date()
+            
+            if date_key:
+                if date_key not in anomalies_by_date:
+                    anomalies_by_date[date_key] = []
+                anomalies_by_date[date_key].append(row)
+        except Exception as e:
+            st.warning(f"Error processing date for symbol {row.get('symbol', 'Unknown')}: {e}")
+            continue
+    
+    if not anomalies_by_date:
+        st.info("No valid date information found in anomaly data.")
+        return
+    
+    # Sort dates in descending order (most recent first)
+    sorted_dates = sorted(anomalies_by_date.keys(), reverse=True)
+    
+    # Create a table for each date
+    for date in sorted_dates:
+        date_anomalies = anomalies_by_date[date]
+        
+        # Create subheader for the date
+        st.subheader(f"Anomalies for {date.strftime('%Y-%m-%d')}")
+        
+        # Process the data for display (same logic as original function)
+        display_data = []
+        for row in date_anomalies:
+            try:
+                # Extract key metrics directly from new table structure with type conversion
+                def safe_numeric(value, default=0, as_int=False):
+                    if value is None or value == '' or str(value).lower() in ['none', 'null']:
+                        return default
+                    try:
+                        if as_int:
+                            return int(float(value))
+                        else:
+                            return float(value)
+                    except (ValueError, TypeError):
+                        return default
+                
+                call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
+                put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
+                total_volume = safe_numeric(row.get('total_volume', call_volume + put_volume), as_int=True)
+                call_baseline = safe_numeric(row.get('call_baseline_avg', 1), default=1)
+                call_multiplier = safe_numeric(row.get('call_multiplier', 0))
+                
+                # Calculate indicators
+                call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
+                otm_score = safe_numeric(row.get('otm_score', 0))
+                
+                # Use pattern description from database or generate one
+                pattern = row.get('pattern_description', 'Unusual trading pattern')
+                if not pattern or pattern == 'Unusual trading pattern':
+                    if call_percentage >= 80:
+                        pattern = "Strong bullish insider activity"
+                    elif call_percentage <= 20:
+                        pattern = "Strong bearish insider activity"
+                    else:
+                        pattern = "Mixed directional positioning"
+                
+                # Format key indicators using new data structure
+                z_score = safe_numeric(row.get('z_score', 0))
+                total_score = safe_numeric(row.get('total_score', 0))
+                
+                key_indicators = f"""• {call_multiplier:.1f}x normal call volume
+• {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
+• OTM Score: {otm_score:.1f}/3.0
+• Z-Score: {z_score:.1f}"""
+                
+                # Handle timestamp safely
+                timestamp_str = 'N/A'
+                if pd.notna(row.get('as_of_timestamp')):
+                    try:
+                        timestamp_str = row['as_of_timestamp'].strftime('%H:%M:%S')
+                    except (AttributeError, ValueError):
+                        timestamp_str = str(row['as_of_timestamp'])
+                
+                display_data.append({
+                    'Symbol': str(row.get('symbol', 'Unknown')),
+                    'Score': f"{total_score:.1f}/10",
+                    'Key Indicators': key_indicators,
+                    'Insider Pattern': pattern,
+                    'Timestamp': timestamp_str
+                })
+                
+            except Exception as e:
+                st.warning(f"Error processing row for symbol {row.get('symbol', 'Unknown')}: {e}")
+                continue
+        
+        # Create DataFrame for display
+        display_df = pd.DataFrame(display_data)
+        
+        # Style the table
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Add some spacing between date groups
+        st.markdown("---")
+
 def create_symbol_analysis(symbol: str, anomaly_data: Dict) -> None:
     """Create detailed analysis for a specific symbol."""
     st.header(f"Deep Dive Analysis: {symbol}")
@@ -397,7 +516,6 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict) -> None:
     # Charts
     create_price_chart(history['stock'], symbol)
     create_options_activity_chart(history['options'], symbol)
-    create_intraday_contracts_table(history['intraday'], symbol)
 
 def create_price_chart(stock_df: pd.DataFrame, symbol: str) -> None:
     """Create stock price chart with volume."""
@@ -509,46 +627,6 @@ def create_options_activity_chart(options_df: pd.DataFrame, symbol: str) -> None
     )
     
     st.plotly_chart(fig, use_container_width=True)
-
-def create_intraday_contracts_table(intraday_df: pd.DataFrame, symbol: str) -> None:
-    """Create table of today's most active contracts."""
-    if intraday_df.empty:
-        return
-    
-    st.subheader(f"{symbol} Today's Most Active Contracts")
-    
-    # Process data for display
-    display_df = intraday_df.copy()
-    display_df['Days to Exp'] = (pd.to_datetime(display_df['expiration_date']) - pd.Timestamp.now()).dt.days
-    display_df['Moneyness'] = ((display_df['strike_price'] / display_df['underlying_price'] - 1) * 100).round(1)
-    display_df['IV'] = (display_df['implied_volatility'] * 100).round(1)
-    
-    # Select and rename columns for display
-    display_columns = {
-        'contract_ticker': 'Contract',
-        'contract_type': 'Type',
-        'strike_price': 'Strike',
-        'session_volume': 'Volume',
-        'session_close': 'Price',
-        'IV': 'IV %',
-        'Days to Exp': 'DTE',
-        'Moneyness': 'Moneyness %',
-        'greeks_delta': 'Delta'
-    }
-    
-    display_df = display_df[list(display_columns.keys())].rename(columns=display_columns)
-    display_df = display_df.head(20)  # Top 20 contracts
-    
-    # Format numeric columns
-    display_df['Strike'] = display_df['Strike'].round(2)
-    display_df['Price'] = display_df['Price'].round(2)
-    display_df['Delta'] = display_df['Delta'].round(3)
-    
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True
-    )
 
 def create_anomaly_timeline_chart(timeline_df: pd.DataFrame) -> None:
     """Create anomaly detection timeline chart."""
@@ -804,6 +882,21 @@ def get_contract_details(symbol: str, target_date: date = None) -> pd.DataFrame:
         # If no historical data found, try temp tables for today's data
         if not rows and target_date == date.today():
             query = """
+                WITH latest_temp_option AS (
+                    SELECT DISTINCT ON (symbol, contract_ticker)
+                        symbol, contract_ticker, session_volume, open_interest, 
+                        session_close, implied_volatility, greeks_delta, as_of_timestamp
+                    FROM temp_option
+                    WHERE symbol = %s AND session_volume > 0
+                    ORDER BY symbol, contract_ticker, as_of_timestamp DESC
+                ),
+                latest_temp_stock AS (
+                    SELECT DISTINCT ON (symbol)
+                        symbol, day_close, day_vwap
+                    FROM temp_stock
+                    WHERE symbol = %s
+                    ORDER BY symbol, as_of_timestamp DESC
+                )
                 SELECT 
                     oc.contract_ticker,
                     oc.contract_type,
@@ -816,14 +909,12 @@ def get_contract_details(symbol: str, target_date: date = None) -> pd.DataFrame:
                     o.greeks_delta,
                     COALESCE(s.day_close, s.day_vwap) as underlying_price,
                     date(o.as_of_timestamp) as date
-                FROM temp_option o
+                FROM latest_temp_option o
                 INNER JOIN option_contracts oc ON o.symbol = oc.symbol AND o.contract_ticker = oc.contract_ticker
-                LEFT JOIN temp_stock s ON o.symbol = s.symbol
-                WHERE o.symbol = %s
-                  AND o.session_volume > 0
+                LEFT JOIN latest_temp_stock s ON o.symbol = s.symbol
                 ORDER BY o.session_volume DESC
             """
-            cur.execute(query, (symbol,))
+            cur.execute(query, (symbol, symbol))
             rows = cur.fetchall()
         
         df = pd.DataFrame([dict(row) for row in rows]) if rows else pd.DataFrame()
@@ -862,13 +953,18 @@ def create_contracts_table(symbol: str, target_date: date = None) -> None:
     # Prepare display columns
     display_df = contracts_df.copy()
     
+    # Convert numeric columns to proper types for sorting
+    display_df['volume'] = pd.to_numeric(display_df['volume'], errors='coerce').fillna(0).astype(int)
+    display_df['open_interest'] = pd.to_numeric(display_df['open_interest'], errors='coerce').fillna(0).astype(int)
+    
     # Format columns for display
     display_df['Strike'] = display_df['strike_price'].apply(lambda x: f"${x:.2f}")
     display_df['Expiration'] = pd.to_datetime(display_df['expiration_date']).dt.strftime('%Y-%m-%d')
     display_df['Days to Exp'] = display_df['days_to_expiry']
-    display_df['Volume'] = display_df['volume'].apply(lambda x: f"{x:,}")
-    display_df['Open Interest'] = display_df['open_interest'].apply(lambda x: f"{x:,}")
+    display_df['Volume'] = display_df['volume']  # Keep as numeric for sorting
+    display_df['Open Interest'] = display_df['open_interest']  # Keep as numeric for sorting
     display_df['Price'] = display_df['close_price'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+    display_df['Underlying'] = display_df['underlying_price'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
     display_df['IV'] = display_df['implied_volatility'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "N/A")
     display_df['Delta'] = display_df['greeks_delta'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "N/A")
     display_df['V/OI Ratio'] = display_df['volume_oi_ratio'].apply(lambda x: f"{x:.2f}")
@@ -876,7 +972,7 @@ def create_contracts_table(symbol: str, target_date: date = None) -> None:
     # Select and reorder columns for display
     display_columns = [
         'contract_ticker', 'contract_type', 'Strike', 'Expiration', 'Days to Exp',
-        'moneyness', 'Volume', 'Open Interest', 'Price', 'IV', 'Delta', 'V/OI Ratio'
+        'moneyness', 'Volume', 'Open Interest', 'Price', 'Underlying', 'IV', 'Delta', 'V/OI Ratio'
     ]
     
     display_df = display_df[display_columns]
@@ -884,7 +980,7 @@ def create_contracts_table(symbol: str, target_date: date = None) -> None:
     # Rename columns for better display
     display_df.columns = [
         'Contract', 'Type', 'Strike', 'Expiration', 'Days to Exp',
-        'Moneyness', 'Volume', 'Open Interest', 'Price', 'IV', 'Delta', 'V/OI Ratio'
+        'Moneyness', 'Volume', 'Open Interest', 'Price', 'Underlying', 'IV', 'Delta', 'V/OI Ratio'
     ]
     
     # Display the table
