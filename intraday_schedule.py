@@ -184,10 +184,10 @@ def run_once(include_otc: bool,
                 if anomaly_results.get('success'):
                     anomaly_count = anomaly_results.get('anomalies_detected', 0)
                     contracts_analyzed = anomaly_results.get('contracts_analyzed', 0)
-                    logger.info(f"[anomaly_detection] ✓ {anomaly_count} high-conviction anomalies detected from {contracts_analyzed:,} contracts")
+                    logger.info(f"[anomaly_detection] ✓ {anomaly_count} symbols scored >= 7.0 from {contracts_analyzed:,} contracts")
                     
                     if anomaly_count > 0:
-                        logger.info(f"[anomaly_detection] ✓ Flagged symbols require investigation for potential insider activity")
+                        logger.info(f"[anomaly_detection] ✓ High-scoring symbols detected - checking volume thresholds for alerts")
                         
                         # Send email notification for high-conviction anomalies
                         logger.info("[notifications] Sending email alert for high-conviction anomalies...")
@@ -195,13 +195,13 @@ def run_once(include_otc: bool,
                             # Get the detected anomalies from the detector
                             anomalies = anomaly_results.get('anomalies', {})
                             if send_anomaly_notification(anomalies):
-                                logger.info(f"[notifications] ✓ Email alert sent for {anomaly_count} anomalies")
+                                logger.info(f"[notifications] ✓ Email alert sent for anomalies")
                             else:
-                                logger.warning("[notifications] ✗ Email alert failed to send")
+                                logger.info("[notifications] ✓ No email sent - no anomalies met volume threshold")
                         except Exception as ne:
                             logger.error(f"[notifications] ✗ Email notification error: {ne}")
                     else:
-                        logger.info("[anomaly_detection] ✓ No high-conviction anomalies detected - market activity within normal ranges")
+                        logger.info("[anomaly_detection] ✓ No symbols scored >= 7.0 - market activity within normal ranges")
                 else:
                     logger.error(f"[anomaly_detection] ✗ Detection failed: {anomaly_results.get('error')}")
             except Exception as ee:

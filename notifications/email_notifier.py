@@ -80,8 +80,8 @@ class EmailNotifier:
         }
         
         if not high_conviction_anomalies:
-            logger.info(f"No anomalies above threshold {self.min_score} with volume > 500")
-            return True
+            logger.info(f"No anomalies detected: No symbols scored >= {self.min_score} with volume > 500")
+            return False  # Return False to indicate no email was sent
             
         try:
             # Create email content
@@ -173,10 +173,14 @@ class EmailNotifier:
             else:
                 pattern = "Mixed directional positioning"
                 
+            open_interest_score = details.get('open_interest_score', 0)
+            open_interest_change = details.get('open_interest_multiplier', 0)
+            
             key_indicators = f"""
                 • {call_multiplier:.1f}x normal call volume<br/>
                 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts<br/>
-                • OTM Score: {details.get('otm_score', 0):.1f}/3.0
+                • OTM Score: {details.get('otm_score', 0):.1f}/2.0<br/>
+                • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
             """
             
             html += f"""
@@ -198,6 +202,7 @@ class EmailNotifier:
             details = data.get('details', {})
             
             volume_score = details.get('volume_score', 0)
+            open_interest_score = details.get('open_interest_score', 0)
             otm_score = details.get('otm_score', 0)  # Fixed: use 'otm_score' not 'otm_call_score'
             directional_score = details.get('directional_score', 0)
             time_score = details.get('time_score', 0)  # Fixed: use 'time_score' not 'time_pressure_score'
@@ -206,6 +211,9 @@ class EmailNotifier:
             put_volume = details.get('put_volume', 0)
             call_baseline = details.get('call_baseline_avg', 1)
             put_baseline = details.get('put_baseline_avg', 1)
+            current_open_interest = details.get('current_open_interest', 0)
+            prior_open_interest = details.get('prior_open_interest', 0)
+            open_interest_multiplier = details.get('open_interest_multiplier', 0)
             
             html += f"""
                 <div class="anomaly">
@@ -214,8 +222,9 @@ class EmailNotifier:
                     <div class="indicators">
                         <h4>Score Breakdown:</h4>
                         <div class="indicator">Volume Anomaly: {volume_score:.1f}/3.0 points</div>
-                        <div class="indicator">OTM Call Concentration: {otm_score:.1f}/3.0 points</div>
-                        <div class="indicator">Directional Bias: {directional_score:.1f}/2.0 points</div>
+                        <div class="indicator">Open Interest Change: {open_interest_score:.1f}/2.0 points</div>
+                        <div class="indicator">OTM Call Concentration: {otm_score:.1f}/2.0 points</div>
+                        <div class="indicator">Directional Bias: {directional_score:.1f}/1.0 points</div>
                         <div class="indicator">Time Pressure: {time_score:.1f}/2.0 points</div>
                     </div>
                     
@@ -225,13 +234,16 @@ class EmailNotifier:
                         <div class="indicator">Put Volume: {put_volume:,} (vs {put_baseline:.0f} baseline avg)</div>
                         <div class="indicator">Call Multiplier: {(call_volume/call_baseline if call_baseline > 0 else 0):.1f}x normal</div>
                         <div class="indicator">Total Volume: {call_volume + put_volume:,} contracts</div>
+                        <div class="indicator">Open Interest: {current_open_interest:,} (vs {prior_open_interest:,} prior day)</div>
+                        <div class="indicator">Open Interest Change: {open_interest_multiplier:.1f}x</div>
                     </div>
                     
                     <div class="indicators">
                         <h4>Insider Trading Indicators:</h4>
                         <div class="indicator">Statistical Significance: {volume_score:.1f}/3.0 (Z-score analysis)</div>
-                        <div class="indicator">OTM Call Focus: {otm_score:.1f}/3.0 (Classic insider pattern)</div>
-                        <div class="indicator">Directional Conviction: {directional_score:.1f}/2.0 (Call/put bias)</div>
+                        <div class="indicator">Open Interest Surge: {open_interest_score:.1f}/2.0 (Position building)</div>
+                        <div class="indicator">OTM Call Focus: {otm_score:.1f}/2.0 (Classic insider pattern)</div>
+                        <div class="indicator">Directional Conviction: {directional_score:.1f}/1.0 (Call/put bias)</div>
                         <div class="indicator">Timing Urgency: {time_score:.1f}/2.0 (Near-term clustering)</div>
                     </div>
                 </div>
@@ -243,7 +255,7 @@ class EmailNotifier:
                 Detection of statistical anomalies does not constitute proof of insider trading or investment advice. 
                 Always conduct proper due diligence and comply with all applicable laws and regulations.</p>
                 
-                <p><strong>📊 View Detailed Analysis:</strong> <a href="https://bk-insidertrades.streamlit.app" style="color: #1f77b4; text-decoration: none;">https://bk-insidertrades.streamlit.app</a></p>
+                <p><strong>View Detailed Analysis:</strong> <a href="https://bk-insidertrades.streamlit.app" style="color: #1f77b4; text-decoration: none;">https://bk-insidertrades.streamlit.app</a></p>
                 
                 <p>Generated by Insider Trading Detection System at {timestamp}</p>
                 <p>For technical support or to modify alert settings, contact your system administrator.</p>

@@ -37,6 +37,7 @@ def get_current_anomalies() -> pd.DataFrame:
                 symbol,
                 total_score,
                 volume_score,
+                open_interest_score,
                 otm_score,
                 directional_score,
                 time_score,
@@ -53,11 +54,13 @@ def get_current_anomalies() -> pd.DataFrame:
                 otm_call_percentage,
                 short_term_percentage,
                 call_put_ratio,
+                open_interest_change,
                 as_of_timestamp,
-                event_date
+                event_date,
+                open_interest,
+                prior_open_interest
             FROM daily_anomaly_snapshot
-            WHERE event_date >= CURRENT_DATE - INTERVAL '7 days'
-              AND total_score >= 7.0
+            WHERE total_score >= 7.0
               AND total_volume >= 500
             ORDER BY total_score DESC, as_of_timestamp DESC
         """
@@ -276,10 +279,13 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
             # Format key indicators using new data structure
             z_score = safe_numeric(row.get('z_score', 0))
             total_score = safe_numeric(row.get('total_score', 0))
+            open_interest_score = safe_numeric(row.get('open_interest_score', 0))
+            open_interest_change = safe_numeric(row.get('open_interest_change', 0))
             
             key_indicators = f"""• {call_multiplier:.1f}x normal call volume
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
-• OTM Score: {otm_score:.1f}/3.0
+• OTM Score: {otm_score:.1f}/2.0
+• Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
 • Z-Score: {z_score:.1f}"""
             
             # Handle timestamp safely
@@ -393,9 +399,13 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                 z_score = safe_numeric(row.get('z_score', 0))
                 total_score = safe_numeric(row.get('total_score', 0))
                 
+                open_interest_score = safe_numeric(row.get('open_interest_score', 0))
+                open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                
                 key_indicators = f"""• {call_multiplier:.1f}x normal call volume
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
-• OTM Score: {otm_score:.1f}/3.0
+• OTM Score: {otm_score:.1f}/2.0
+• Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
 • Z-Score: {z_score:.1f}"""
                 
                 # Handle timestamp safely
@@ -444,7 +454,7 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict) -> None:
     
     # Score breakdown
     details = anomaly_data.get('details', {})
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         st.metric(
@@ -455,22 +465,29 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict) -> None:
     
     with col2:
         st.metric(
-            "OTM Call Score", 
-            f"{details.get('otm_call_score', 0):.1f}/3.0",
-            help="Out-of-money call concentration (classic insider pattern)"
+            "Open Interest Score", 
+            f"{details.get('open_interest_score', 0):.1f}/2.0",
+            help="Open interest change vs prior day"
         )
     
     with col3:
         st.metric(
-            "Directional Score",
-            f"{details.get('directional_score', 0):.1f}/2.0", 
-            help="Strong call/put preference indicating conviction"
+            "OTM Call Score", 
+            f"{details.get('otm_score', 0):.1f}/2.0",
+            help="Out-of-money call concentration (classic insider pattern)"
         )
     
     with col4:
         st.metric(
+            "Directional Score",
+            f"{details.get('directional_score', 0):.1f}/1.0", 
+            help="Strong call/put preference indicating conviction"
+        )
+    
+    with col5:
+        st.metric(
             "Time Pressure Score",
-            f"{details.get('time_pressure_score', 0):.1f}/2.0",
+            f"{details.get('time_score', 0):.1f}/2.0",
             help="Near-term expiration clustering"
         )
     
@@ -481,8 +498,11 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict) -> None:
     put_volume = details.get('put_volume', 0)
     call_baseline = details.get('call_baseline_avg', 1)
     put_baseline = details.get('put_baseline_avg', 1)
+    current_open_interest = details.get('current_open_interest', 0)
+    prior_open_interest = details.get('prior_open_interest', 0)
+    open_interest_multiplier = details.get('open_interest_multiplier', 0)
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         st.metric(
@@ -511,6 +531,14 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict) -> None:
             "Total Volume",
             f"{call_volume + put_volume:,}",
             help="Total option contracts traded today"
+        )
+    
+    with col5:
+        st.metric(
+            "Open Interest",
+            f"{current_open_interest:,}",
+            delta=f"{open_interest_multiplier:.1f}x vs prior day",
+            help=f"Current: {current_open_interest:,} vs Prior: {prior_open_interest:,}"
         )
     
     # Charts

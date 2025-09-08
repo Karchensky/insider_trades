@@ -106,15 +106,19 @@ def main():
                     'composite_score': float(symbol_anomaly['total_score']),
                     'details': {
                         'volume_score': float(symbol_anomaly.get('volume_score', 0)),
-                        'otm_call_score': float(symbol_anomaly.get('otm_score', 0)),  # Note: function expects 'otm_call_score'
+                        'open_interest_score': float(symbol_anomaly.get('open_interest_score', 0)),
+                        'otm_score': float(symbol_anomaly.get('otm_score', 0)),
                         'directional_score': float(symbol_anomaly.get('directional_score', 0)),
-                        'time_pressure_score': float(symbol_anomaly.get('time_score', 0)),  # Note: function expects 'time_pressure_score'
+                        'time_score': float(symbol_anomaly.get('time_score', 0)),
                         'call_volume': int(symbol_anomaly.get('call_volume', 0)),
                         'put_volume': int(symbol_anomaly.get('put_volume', 0)),
                         'total_volume': int(symbol_anomaly.get('total_volume', 0)),
                         'call_baseline_avg': float(symbol_anomaly.get('call_baseline_avg', 0)),
                         'put_baseline_avg': float(symbol_anomaly.get('put_baseline_avg', 0)),
                         'call_multiplier': float(symbol_anomaly.get('call_multiplier', 0)),
+                        'current_open_interest': int(symbol_anomaly.get('open_interest', 0)),
+                        'prior_open_interest': int(symbol_anomaly.get('prior_open_interest', 0)),
+                        'open_interest_multiplier': float(symbol_anomaly.get('open_interest_change', 0)),
                         'pattern_description': symbol_anomaly.get('pattern_description', 'Unusual trading pattern'),
                         'z_score': float(symbol_anomaly.get('z_score', 0))
                     }
