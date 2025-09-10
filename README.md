@@ -4,9 +4,12 @@ Scrapes polygon API to try & find insder trading patterns
 
 ## Project Structure
 
-```
+```text
 insider_trades/
 ├── app/                           # Streamlit dashboard application
+│   ├── streamlit_app.py          # Main dashboard interface
+│   ├── dashboard_functions.py    # Dashboard utility functions
+│   └── requirements.txt          # Dashboard dependencies
 ├── database/                      # All database-related functionality
 │   ├── core/                     # Database connections, bulk operations
 │   │   ├── connection.py         # PostgreSQL connection management
@@ -69,7 +72,7 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
 **Schedule**: Every 15 minutes during market hours (9:30 AM - 4:00 PM EST) via GitHub Actions
 **Purpose**: Real-time insider trading detection
 
-### Step-by-Step Process:
+### Intraday Step-by-Step Process
 
 1. **Stock Snapshot Collection**
 
@@ -92,9 +95,12 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
 4. **Email Notifications**
 
    - Sends detailed HTML email alerts for high-conviction anomalies
+   - Separates high volume (≥500) and low volume (<500) anomalies into distinct sections
+   - Shows appropriate call/put multipliers based on dominant direction
+   - Includes "Insider Pattern" column indicating bear/bull direction
    - Configurable via environment variables (SMTP settings, thresholds)
 
-**Usage**:
+#### Intraday Usage
 
 ```bash
 python intraday_schedule.py --retention 1 --options-limit 50000
@@ -105,7 +111,7 @@ python intraday_schedule.py --retention 1 --options-limit 50000
 **Schedule**: Daily at 8:00 AM EST (morning after business days) via GitHub Actions
 **Purpose**: Historical data archival, contract metadata management, and cleanup
 
-### Step-by-Step Process:
+### Daily Step-by-Step Process
 
 1. **Stock Data Archival**
 
@@ -134,7 +140,7 @@ python intraday_schedule.py --retention 1 --options-limit 50000
    - Removes `daily_anomaly_snapshot` records older than retention period
    - Uses bulk operations for efficiency
 
-**Usage**:
+#### Daily Usage
 
 ```bash
 python daily_schedule.py --recent 3 --retention 30 --ticker-limit 1000
@@ -160,17 +166,18 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 - Put Score: `min(put_z_score / 3.0, 1.5)` (max 3.0 points)
 - Total: Max of call or put score
 
-#### 2. OTM Call Concentration Score (0-2 points)
+#### 2. OTM Options Concentration Score (0-2 points)
 
-**Purpose**: Identify out-of-the-money call concentration (classic insider pattern)
+**Purpose**: Identify out-of-the-money options concentration
 
 **Calculation Method**:
 
 - OTM Calls: `strike_price > underlying_price * 1.05` (5% out-of-money)
+- OTM Puts: `strike_price < underlying_price * 0.95` (5% out-of-money)
 - Short-term OTM: `expiration_date <= current_date + 21 days`
-- OTM Ratio: `otm_call_volume / total_call_volume`
-- Short-term Ratio: `short_term_otm_volume / total_call_volume`
-- Score: `(otm_ratio * 1.0) + (short_term_otm_ratio * 1.0)` (max 2.0 points)
+- Call Score: `(otm_call_ratio * 1.0) + (short_term_call_ratio * 1.0)`
+- Put Score: `(otm_put_ratio * 1.0) + (short_term_put_ratio * 1.0)`
+- Final Score: Use score from direction with most volume (calls vs puts) (max 2.0 points)
 
 **Example**: ARES with heavy short-term OTM call focus = 2.0/2.0 points
 
@@ -181,27 +188,29 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 **Calculation Method**:
 
 - Call Ratio: `call_volume / (call_volume + put_volume)`
-- Scoring Thresholds:
-  - 80%+ calls = 1.0 points (bullish insider conviction)
-  - 70-79% calls = 0.8 points
-  - 60-69% calls = 0.6 points
-  - 80%+ puts = 0.8 points (bearish insider conviction)
-  - Otherwise = 0.0 points
+- Distance from 50/50: `abs(call_ratio - 0.5)`
+- Score: `distance_from_50_50 * 2` (max 1.0 points)
+- 100% calls = 1.0 points (maximum bullish conviction)
+- 100% puts = 1.0 points (maximum bearish conviction)
+- 50/50 split = 0.0 points (no directional bias)
+
+**Note**: This scoring method weights heavy call and put directions equally, providing fair scoring for both bullish and bearish insider activity.
 
 #### 4. Open Interest Change Score (0-2 points)
 
 **Purpose**: Detect unusual increases in open interest (new positions being established)
 
 **Calculation Method**:
+
 - Current Day Open Interest: Sum of all contract open interest
 - Prior Day Open Interest: Previous trading day's total open interest
 - Multiplier: `current_open_interest / prior_open_interest`
-- Scoring Thresholds:
-  - ≥5.0x increase = 2.0 points (major new positioning)
-  - 3.0-4.9x increase = 1.5 points
-  - 2.0-2.9x increase = 1.0 points
-  - 1.5-1.9x increase = 0.5 points
-  - <1.5x increase = 0.0 points
+- New Scoring Formula: `(multiplier - 1) / 2` (capped at 2.0)
+- 5.0x increase = 2.0 points (maximum score)
+- 3.0x increase = 1.0 points
+- 1.0x increase = 0.0 points (no change)
+
+**Note**: This scoring method provides linear scaling where a 5x multiplier equals the maximum score of 2.0 points.
 
 #### 5. Time Pressure Score (0-2 points)
 
@@ -210,29 +219,46 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 **Calculation Method**:
 
 - This Week Ratio: `volume_expiring_<=7_days / total_volume`
-- Short-term Ratio: `volume_expiring_<=21_days / total_volume`
+- Short-term Ratio: `volume_expiring_<=21_days / total_volume` (includes this week)
 - Score: `(this_week_ratio * 1.2) + (short_term_ratio * 0.8)` (max 2.0 points)
+
+**Note**: Contracts expiring within 7 days are counted towards both "this week" and "short-term" volume components to ensure accurate scoring.
 
 ### Composite Scoring and Alerting
 
 **Total Score Calculation**:
 
-```
+```text
 Composite Score = Volume Score + Open Interest Score + OTM Score + Directional Score + Time Pressure Score
 Maximum Possible: 10.0 points (3+2+2+1+2)
 ```
 
 **Alert Threshold**: Only symbols with `composite_score >= 7.0` are flagged as high-conviction
 
+**Volume Filtering**:
+
+- High Volume Anomalies: Volume ≥ 500 (primary alerts)
+- Low Volume Anomalies: Volume < 500 (secondary alerts, shown separately)
+- Both categories are included in email notifications and dashboard displays
+- Volume information is displayed in all anomaly summary tables
+- Email notifications show appropriate call/put multipliers based on dominant direction
+
 **Example High-Conviction Detection**:
 
-```
+```text
 ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 - Volume: 9.6x normal call activity (statistical anomaly)
 - OTM: Heavy concentration in short-term out-of-money calls
 - Directional: 90% bias toward calls (extreme conviction)
 - Time: Moderate clustering in near-term expirations
 ```
+
+**Recent Improvements**:
+
+- **OTM Scoring Logic**: Now uses the score from the direction (calls vs puts) with the most total volume, rather than taking the maximum score
+- **Time Pressure Bug Fix**: Fixed calculation to ensure contracts expiring within 7 days are counted towards both "this week" and "short-term" volume components
+- **Volume Display**: Added total volume column to all anomaly summary tables in both email notifications and Streamlit dashboard
+- **Directional Indicators**: Email and dashboard now show appropriate call/put multipliers based on dominant direction (e.g., "3.8x normal call volume" for bullish, "14.1x normal put volume" for bearish)
 
 ### Detection Performance Metrics
 
@@ -286,7 +312,7 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 #### `daily_anomaly_snapshot`
 
 - **Purpose**: High-conviction insider trading alerts
-- **Key Fields**: event_date, symbol, total_score, volume_score, otm_score, directional_score, time_score, call_volume, put_volume, pattern_description, as_of_timestamp
+- **Key Fields**: event_date, symbol, total_score, volume_score, open_interest_score, otm_score, directional_score, time_score, call_volume, put_volume, total_volume, call_baseline_avg, put_baseline_avg, call_multiplier, put_multiplier, direction, pattern_description, z_score, otm_call_percentage, short_term_percentage, call_put_ratio, open_interest_change, open_interest, prior_open_interest, as_of_timestamp
 - **Retention**: 7 days (fixed)
 - **Update Frequency**: Every 15 minutes (during anomaly detection)
 
@@ -298,6 +324,125 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 - **Key Fields**: symbol, contract_ticker (composite primary key), contract_type, strike_price, expiration_date, exercise_style
 - **Retention**: Based on expiration_date (expires contracts older than retention period)
 - **Update Frequency**:  Incremental (only new contracts daily)
+
+## Streamlit Dashboard
+
+The system includes a comprehensive Streamlit dashboard for visualizing and analyzing anomaly data.
+
+### Dashboard Features
+
+- **Anomaly Overview**: Summary table showing all detected anomalies with scores and key metrics
+- **Volume Filtering**: Separate sections for high volume (≥500) and low volume (<500) anomalies
+- **Date-based Analysis**: Tables organized by date showing anomalies for specific trading days
+- **Key Indicators**: Displays appropriate call/put multipliers based on dominant direction
+- **Insider Pattern**: Shows directional bias (bullish, bearish, mixed) for each anomaly
+- **Interactive Filtering**: Filter by date range, score threshold, and volume levels
+
+### Running the Dashboard
+
+```bash
+cd app
+streamlit run streamlit_app.py
+```
+
+The dashboard will be available at `http://localhost:8501` and provides real-time visualization of the anomaly detection system's output.
+
+## Notification System
+
+The system includes a comprehensive email notification system for alerting on high-conviction anomalies.
+
+### Email Notification Features
+
+- **HTML Email Format**: Rich, formatted HTML emails with tables and styling
+- **Volume-based Filtering**: Separate sections for high volume (≥500) and low volume (<500) anomalies
+- **Directional Indicators**: Shows appropriate call/put multipliers based on dominant direction
+- **Insider Pattern Detection**: Indicates bullish, bearish, or mixed directional positioning
+- **Key Metrics Display**: Shows OTM scores, open interest changes, and other critical metrics
+- **Configurable Thresholds**: Customizable via environment variables
+
+### Email Content Structure
+
+- **High Volume Anomalies**: Primary alerts for significant volume anomalies
+- **Low Volume Anomalies**: Secondary alerts for lower volume but still significant patterns
+- **Summary Tables**: Detailed breakdown of each anomaly with scores and metrics
+- **Pattern Analysis**: Clear indication of insider trading patterns and directional bias
+
+### Configuration
+
+Email notifications are configured via environment variables:
+
+```bash
+SMTP_SERVER=your_smtp_server
+SMTP_PORT=587
+SMTP_USERNAME=your_email@domain.com
+SMTP_PASSWORD=your_password
+NOTIFICATION_EMAIL=recipient@domain.com
+```
+
+## Database Migrations
+
+The system includes a comprehensive migration system for managing database schema changes.
+
+### Migration System Features
+
+- **Automatic Migration Detection**: Automatically detects and runs pending migrations
+- **Rollback Support**: Each migration includes both `up()` and `down()` functions for rollback capability
+- **Version Control**: Migrations are timestamped and versioned for proper ordering
+- **Error Handling**: Comprehensive error handling with rollback on failure
+
+### Running Migrations
+
+```bash
+# Run all pending migrations
+python migrations/migration_manager.py
+
+# Run a specific migration
+python migrations/YYYYMMDD_######_migration_name.py
+
+# Rollback a specific migration
+python migrations/YYYYMMDD_######_migration_name.py down
+```
+
+### Migration Naming Convention
+
+- Format: `YYYYMMDD_######_descriptive_name.py`
+- Example: `20250909_000001_add_max_total_score_column.py`
+- Migrations are executed in chronological order
+
+## Testing and Debugging
+
+The system includes comprehensive testing and debugging capabilities for ensuring accuracy and reliability.
+
+### Testing Features
+
+- **Ad-hoc Query Testing**: Ability to test specific symbols and compare results with database records
+- **Score Verification**: Detailed breakdown of individual scoring components for validation
+- **Data Accuracy Checks**: Verification of calculations against expected results
+- **Round-trip Testing**: End-to-end testing of data flow from collection to storage
+
+### Debugging Tools
+
+- **Detailed Logging**: Comprehensive logging throughout the anomaly detection process
+- **Score Breakdown**: Individual component scores for each anomaly (volume, OTM, directional, etc.)
+- **Data Validation**: Checks for data integrity and calculation accuracy
+- **Performance Monitoring**: Tracking of processing times and system performance
+
+### Common Testing Scenarios
+
+- **Score Discrepancy Investigation**: When calculated scores don't match expected values
+- **Data Source Verification**: Confirming data accuracy from different sources (temp vs daily tables)
+- **Calculation Validation**: Verifying mathematical formulas and scoring logic
+- **Edge Case Testing**: Testing unusual market conditions and data patterns
+
+### Debugging Commands
+
+```bash
+# Test specific symbol scoring
+python -c "from database.analysis.insider_anomaly_detection import InsiderAnomalyDetector; detector = InsiderAnomalyDetector(); print(detector.analyze_symbol('SYMBOL'))"
+
+# Verify database data
+python -c "from database.core.connection import db; conn = db.connect(); cursor = conn.cursor(); cursor.execute('SELECT * FROM daily_anomaly_snapshot WHERE symbol = %s', ('SYMBOL',)); print(cursor.fetchall())"
+```
 
 ## Configuration and Usage
 
