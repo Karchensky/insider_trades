@@ -61,7 +61,6 @@ def get_current_anomalies() -> pd.DataFrame:
                 prior_open_interest
             FROM daily_anomaly_snapshot
             WHERE total_score >= 7.0
-              AND total_volume >= 500
             ORDER BY total_score DESC, as_of_timestamp DESC
         """
         
@@ -239,84 +238,165 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
     
     st.subheader("High-Conviction Insider Trading Alerts")
     
-    # Process the data for display
-    display_data = []
-    for _, row in anomalies_df.iterrows():
+    # Separate high and low volume anomalies
+    high_volume_df = anomalies_df[anomalies_df['total_volume'] >= 500].copy()
+    low_volume_df = anomalies_df[anomalies_df['total_volume'] < 500].copy()
+    
+    # Helper function for safe numeric conversion
+    def safe_numeric(value, default=0, as_int=False):
+        if value is None or value == '' or str(value).lower() in ['none', 'null']:
+            return default
         try:
-            # Extract key metrics directly from new table structure with type conversion
-            # Handle both string and numeric types safely
-            def safe_numeric(value, default=0, as_int=False):
-                if value is None or value == '' or str(value).lower() in ['none', 'null']:
-                    return default
-                try:
-                    if as_int:
-                        return int(float(value))
-                    else:
-                        return float(value)
-                except (ValueError, TypeError):
-                    return default
-            
-            call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
-            put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
-            total_volume = safe_numeric(row.get('total_volume', call_volume + put_volume), as_int=True)
-            call_baseline = safe_numeric(row.get('call_baseline_avg', 1), default=1)
-            call_multiplier = safe_numeric(row.get('call_multiplier', 0))
-            
-            # Calculate indicators
-            call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
-            otm_score = safe_numeric(row.get('otm_score', 0))
-            
-            # Use pattern description from database or generate one
-            pattern = row.get('pattern_description', 'Unusual trading pattern')
-            if not pattern or pattern == 'Unusual trading pattern':
+            if as_int:
+                return int(float(value))
+            else:
+                return float(value)
+        except (ValueError, TypeError):
+            return default
+    
+    # Process high volume anomalies
+    if not high_volume_df.empty:
+        st.write("**High Volume Anomalies (Volume ≥ 500)**")
+        display_data = []
+        for _, row in high_volume_df.iterrows():
+            try:
+                call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
+                put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
+                total_volume = safe_numeric(row.get('total_volume', call_volume + put_volume), as_int=True)
+                call_baseline = safe_numeric(row.get('call_baseline_avg', 1), default=1)
+                put_baseline = safe_numeric(row.get('put_baseline_avg', 1), default=1)
+                call_multiplier = safe_numeric(row.get('call_multiplier', 0))
+                put_multiplier = safe_numeric(row.get('put_multiplier', 0))
+                
+                # Calculate indicators
+                call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
+                otm_score = safe_numeric(row.get('otm_score', 0))
+                
+                # Determine insider pattern and appropriate multiplier
                 if call_percentage >= 80:
                     pattern = "Strong bullish insider activity"
+                    volume_text = f"{call_multiplier:.1f}x normal call volume"
                 elif call_percentage <= 20:
                     pattern = "Strong bearish insider activity"
+                    volume_text = f"{put_multiplier:.1f}x normal put volume"
                 else:
                     pattern = "Mixed directional positioning"
-            
-            # Format key indicators using new data structure
-            z_score = safe_numeric(row.get('z_score', 0))
-            total_score = safe_numeric(row.get('total_score', 0))
-            open_interest_score = safe_numeric(row.get('open_interest_score', 0))
-            open_interest_change = safe_numeric(row.get('open_interest_change', 0))
-            
-            key_indicators = f"""• {call_multiplier:.1f}x normal call volume
+                    volume_text = f"{call_multiplier:.1f}x call, {put_multiplier:.1f}x put"
+                
+                # Format key indicators using new data structure
+                z_score = safe_numeric(row.get('z_score', 0))
+                total_score = safe_numeric(row.get('total_score', 0))
+                open_interest_score = safe_numeric(row.get('open_interest_score', 0))
+                open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                
+                key_indicators = f"""• {volume_text}
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/2.0
 • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
 • Z-Score: {z_score:.1f}"""
-            
-            # Handle timestamp safely
-            timestamp_str = 'N/A'
-            if pd.notna(row.get('as_of_timestamp')):
-                try:
-                    timestamp_str = row['as_of_timestamp'].strftime('%H:%M:%S')
-                except (AttributeError, ValueError):
-                    timestamp_str = str(row['as_of_timestamp'])
-            
-            display_data.append({
-                'Symbol': str(row.get('symbol', 'Unknown')),
-                'Score': f"{total_score:.1f}/10",
-                'Key Indicators': key_indicators,
-                'Insider Pattern': pattern,
-                'Timestamp': timestamp_str
-            })
-            
-        except Exception as e:
-            st.warning(f"Error processing row for symbol {row.get('symbol', 'Unknown')}: {e}")
-            continue
+                
+                # Handle timestamp safely
+                timestamp_str = 'N/A'
+                if pd.notna(row.get('as_of_timestamp')):
+                    try:
+                        timestamp_str = row['as_of_timestamp'].strftime('%H:%M:%S')
+                    except (AttributeError, ValueError):
+                        timestamp_str = str(row['as_of_timestamp'])
+                
+                display_data.append({
+                    'Symbol': str(row.get('symbol', 'Unknown')),
+                    'Score': f"{total_score:.1f}/10",
+                    'Volume': f"{total_volume:,}",
+                    'Key Indicators': key_indicators,
+                    'Insider Pattern': pattern,
+                    'Timestamp': timestamp_str
+                })
+                
+            except Exception as e:
+                st.warning(f"Error processing row for symbol {row.get('symbol', 'Unknown')}: {e}")
+                continue
+        
+        # Create DataFrame for display
+        display_df = pd.DataFrame(display_data)
+        
+        # Style the table
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True
+        )
     
-    # Create DataFrame for display
-    display_df = pd.DataFrame(display_data)
-    
-    # Style the table
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True
-    )
+    # Process low volume anomalies
+    if not low_volume_df.empty:
+        st.write("**Low Volume Anomalies (Volume < 500)**")
+        display_data = []
+        for _, row in low_volume_df.iterrows():
+            try:
+                call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
+                put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
+                total_volume = safe_numeric(row.get('total_volume', call_volume + put_volume), as_int=True)
+                call_baseline = safe_numeric(row.get('call_baseline_avg', 1), default=1)
+                put_baseline = safe_numeric(row.get('put_baseline_avg', 1), default=1)
+                call_multiplier = safe_numeric(row.get('call_multiplier', 0))
+                put_multiplier = safe_numeric(row.get('put_multiplier', 0))
+                
+                # Calculate indicators
+                call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
+                otm_score = safe_numeric(row.get('otm_score', 0))
+                
+                # Determine insider pattern and appropriate multiplier
+                if call_percentage >= 80:
+                    pattern = "Strong bullish insider activity"
+                    volume_text = f"{call_multiplier:.1f}x normal call volume"
+                elif call_percentage <= 20:
+                    pattern = "Strong bearish insider activity"
+                    volume_text = f"{put_multiplier:.1f}x normal put volume"
+                else:
+                    pattern = "Mixed directional positioning"
+                    volume_text = f"{call_multiplier:.1f}x call, {put_multiplier:.1f}x put"
+                
+                # Format key indicators using new data structure
+                z_score = safe_numeric(row.get('z_score', 0))
+                total_score = safe_numeric(row.get('total_score', 0))
+                open_interest_score = safe_numeric(row.get('open_interest_score', 0))
+                open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                
+                key_indicators = f"""• {volume_text}
+• {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
+• OTM Score: {otm_score:.1f}/2.0
+• Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
+• Z-Score: {z_score:.1f}"""
+                
+                # Handle timestamp safely
+                timestamp_str = 'N/A'
+                if pd.notna(row.get('as_of_timestamp')):
+                    try:
+                        timestamp_str = row['as_of_timestamp'].strftime('%H:%M:%S')
+                    except (AttributeError, ValueError):
+                        timestamp_str = str(row['as_of_timestamp'])
+                
+                display_data.append({
+                    'Symbol': str(row.get('symbol', 'Unknown')),
+                    'Score': f"{total_score:.1f}/10",
+                    'Volume': f"{total_volume:,}",
+                    'Key Indicators': key_indicators,
+                    'Insider Pattern': pattern,
+                    'Timestamp': timestamp_str
+                })
+                
+            except Exception as e:
+                st.warning(f"Error processing row for symbol {row.get('symbol', 'Unknown')}: {e}")
+                continue
+        
+        # Create DataFrame for display
+        display_df = pd.DataFrame(display_data)
+        
+        # Style the table
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True
+        )
 
 def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
     """Create anomaly summary tables grouped by date, ordered by date descending."""
@@ -325,6 +405,18 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
         return
     
     st.subheader("High-Conviction Insider Trading Alerts")
+    
+    # Helper function for safe numeric conversion
+    def safe_numeric(value, default=0, as_int=False):
+        if value is None or value == '' or str(value).lower() in ['none', 'null']:
+            return default
+        try:
+            if as_int:
+                return int(float(value))
+            else:
+                return float(value)
+        except (ValueError, TypeError):
+            return default
     
     # Group anomalies by date
     anomalies_by_date = {}
@@ -359,84 +451,151 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
         # Create subheader for the date
         st.subheader(f"Anomalies for {date.strftime('%Y-%m-%d')}")
         
-        # Process the data for display (same logic as original function)
-        display_data = []
-        for row in date_anomalies:
-            try:
-                # Extract key metrics directly from new table structure with type conversion
-                def safe_numeric(value, default=0, as_int=False):
-                    if value is None or value == '' or str(value).lower() in ['none', 'null']:
-                        return default
-                    try:
-                        if as_int:
-                            return int(float(value))
-                        else:
-                            return float(value)
-                    except (ValueError, TypeError):
-                        return default
-                
-                call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
-                put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
-                total_volume = safe_numeric(row.get('total_volume', call_volume + put_volume), as_int=True)
-                call_baseline = safe_numeric(row.get('call_baseline_avg', 1), default=1)
-                call_multiplier = safe_numeric(row.get('call_multiplier', 0))
-                
-                # Calculate indicators
-                call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
-                otm_score = safe_numeric(row.get('otm_score', 0))
-                
-                # Use pattern description from database or generate one
-                pattern = row.get('pattern_description', 'Unusual trading pattern')
-                if not pattern or pattern == 'Unusual trading pattern':
+        # Separate high and low volume anomalies
+        high_volume_anomalies = [row for row in date_anomalies if safe_numeric(row.get('total_volume', 0), as_int=True) >= 500]
+        low_volume_anomalies = [row for row in date_anomalies if safe_numeric(row.get('total_volume', 0), as_int=True) < 500]
+        
+        # Process high volume anomalies
+        if high_volume_anomalies:
+            st.write("**High Volume Anomalies (Volume ≥ 500)**")
+            display_data = []
+            for row in high_volume_anomalies:
+                try:
+                    call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
+                    put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
+                    total_volume = safe_numeric(row.get('total_volume', call_volume + put_volume), as_int=True)
+                    call_baseline = safe_numeric(row.get('call_baseline_avg', 1), default=1)
+                    put_baseline = safe_numeric(row.get('put_baseline_avg', 1), default=1)
+                    call_multiplier = safe_numeric(row.get('call_multiplier', 0))
+                    put_multiplier = safe_numeric(row.get('put_multiplier', 0))
+                    
+                    # Calculate indicators
+                    call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
+                    otm_score = safe_numeric(row.get('otm_score', 0))
+                    
+                    # Determine insider pattern and appropriate multiplier
                     if call_percentage >= 80:
                         pattern = "Strong bullish insider activity"
+                        volume_text = f"{call_multiplier:.1f}x normal call volume"
                     elif call_percentage <= 20:
                         pattern = "Strong bearish insider activity"
+                        volume_text = f"{put_multiplier:.1f}x normal put volume"
                     else:
                         pattern = "Mixed directional positioning"
-                
-                # Format key indicators using new data structure
-                z_score = safe_numeric(row.get('z_score', 0))
-                total_score = safe_numeric(row.get('total_score', 0))
-                
-                open_interest_score = safe_numeric(row.get('open_interest_score', 0))
-                open_interest_change = safe_numeric(row.get('open_interest_change', 0))
-                
-                key_indicators = f"""• {call_multiplier:.1f}x normal call volume
+                        volume_text = f"{call_multiplier:.1f}x call, {put_multiplier:.1f}x put"
+                    
+                    # Format key indicators using new data structure
+                    z_score = safe_numeric(row.get('z_score', 0))
+                    total_score = safe_numeric(row.get('total_score', 0))
+                    open_interest_score = safe_numeric(row.get('open_interest_score', 0))
+                    open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                    
+                    key_indicators = f"""• {volume_text}
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/2.0
 • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
 • Z-Score: {z_score:.1f}"""
-                
-                # Handle timestamp safely
-                timestamp_str = 'N/A'
-                if pd.notna(row.get('as_of_timestamp')):
-                    try:
-                        timestamp_str = row['as_of_timestamp'].strftime('%H:%M:%S')
-                    except (AttributeError, ValueError):
-                        timestamp_str = str(row['as_of_timestamp'])
-                
-                display_data.append({
-                    'Symbol': str(row.get('symbol', 'Unknown')),
-                    'Score': f"{total_score:.1f}/10",
-                    'Key Indicators': key_indicators,
-                    'Insider Pattern': pattern,
-                    'Timestamp': timestamp_str
-                })
-                
-            except Exception as e:
-                st.warning(f"Error processing row for symbol {row.get('symbol', 'Unknown')}: {e}")
-                continue
+                    
+                    # Handle timestamp safely
+                    timestamp_str = 'N/A'
+                    if pd.notna(row.get('as_of_timestamp')):
+                        try:
+                            timestamp_str = row['as_of_timestamp'].strftime('%H:%M:%S')
+                        except (AttributeError, ValueError):
+                            timestamp_str = str(row['as_of_timestamp'])
+                    
+                    display_data.append({
+                        'Symbol': str(row.get('symbol', 'Unknown')),
+                        'Score': f"{total_score:.1f}/10",
+                        'Volume': f"{total_volume:,}",
+                        'Key Indicators': key_indicators,
+                        'Timestamp': timestamp_str
+                    })
+                    
+                except Exception as e:
+                    st.warning(f"Error processing row for symbol {row.get('symbol', 'Unknown')}: {e}")
+                    continue
+            
+            # Create DataFrame for display
+            display_df = pd.DataFrame(display_data)
+            
+            # Style the table
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True
+            )
         
-        # Create DataFrame for display
-        display_df = pd.DataFrame(display_data)
-        
-        # Style the table
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True
-        )
+        # Process low volume anomalies
+        if low_volume_anomalies:
+            st.write("**Low Volume Anomalies (Volume < 500)**")
+            display_data = []
+            for row in low_volume_anomalies:
+                try:
+                    call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
+                    put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
+                    total_volume = safe_numeric(row.get('total_volume', call_volume + put_volume), as_int=True)
+                    call_baseline = safe_numeric(row.get('call_baseline_avg', 1), default=1)
+                    put_baseline = safe_numeric(row.get('put_baseline_avg', 1), default=1)
+                    call_multiplier = safe_numeric(row.get('call_multiplier', 0))
+                    put_multiplier = safe_numeric(row.get('put_multiplier', 0))
+                    
+                    # Calculate indicators
+                    call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
+                    otm_score = safe_numeric(row.get('otm_score', 0))
+                    
+                    # Determine insider pattern and appropriate multiplier
+                    if call_percentage >= 80:
+                        pattern = "Strong bullish insider activity"
+                        volume_text = f"{call_multiplier:.1f}x normal call volume"
+                    elif call_percentage <= 20:
+                        pattern = "Strong bearish insider activity"
+                        volume_text = f"{put_multiplier:.1f}x normal put volume"
+                    else:
+                        pattern = "Mixed directional positioning"
+                        volume_text = f"{call_multiplier:.1f}x call, {put_multiplier:.1f}x put"
+                    
+                    # Format key indicators using new data structure
+                    z_score = safe_numeric(row.get('z_score', 0))
+                    total_score = safe_numeric(row.get('total_score', 0))
+                    open_interest_score = safe_numeric(row.get('open_interest_score', 0))
+                    open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                    
+                    key_indicators = f"""• {volume_text}
+• {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
+• OTM Score: {otm_score:.1f}/2.0
+• Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
+• Z-Score: {z_score:.1f}"""
+                    
+                    # Handle timestamp safely
+                    timestamp_str = 'N/A'
+                    if pd.notna(row.get('as_of_timestamp')):
+                        try:
+                            timestamp_str = row['as_of_timestamp'].strftime('%H:%M:%S')
+                        except (AttributeError, ValueError):
+                            timestamp_str = str(row['as_of_timestamp'])
+                    
+                    display_data.append({
+                        'Symbol': str(row.get('symbol', 'Unknown')),
+                        'Score': f"{total_score:.1f}/10",
+                        'Volume': f"{total_volume:,}",
+                        'Key Indicators': key_indicators,
+                        'Timestamp': timestamp_str
+                    })
+                    
+                except Exception as e:
+                    st.warning(f"Error processing row for symbol {row.get('symbol', 'Unknown')}: {e}")
+                    continue
+            
+            # Create DataFrame for display
+            display_df = pd.DataFrame(display_data)
+            
+            # Style the table
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True
+            )
         
         # Add some spacing between date groups
         st.markdown("---")

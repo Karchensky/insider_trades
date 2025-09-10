@@ -74,36 +74,48 @@ class EmailNotifier:
             return True
             
         # Filter anomalies by minimum score and volume
-        high_conviction_anomalies = {
+        high_volume_anomalies = {
             symbol: data for symbol, data in anomalies.items()
-            if data.get('composite_score', 0) >= self.min_score and data.get('total_volume', 0) > 500
+            if data.get('composite_score', 0) >= self.min_score and data.get('total_volume', 0) >= 500
         }
         
-        if not high_conviction_anomalies:
-            logger.info(f"No anomalies detected: No symbols scored >= {self.min_score} with volume > 500")
+        low_volume_anomalies = {
+            symbol: data for symbol, data in anomalies.items()
+            if data.get('composite_score', 0) >= self.min_score and data.get('total_volume', 0) < 500
+        }
+        
+        if not high_volume_anomalies and not low_volume_anomalies:
+            logger.info(f"No anomalies detected: No symbols scored >= {self.min_score}")
             return False  # Return False to indicate no email was sent
             
         try:
             # Create email content
-            subject = f"INSIDER TRADING ALERT: {len(high_conviction_anomalies)} High-Conviction Anomalies (Score≥{self.min_score}, Volume>500)"
-            html_content = self._create_email_content(high_conviction_anomalies)
+            total_anomalies = len(high_volume_anomalies) + len(low_volume_anomalies)
+            subject = f"INSIDER TRADING ALERT: {total_anomalies} High-Conviction Anomalies (Score≥{self.min_score})"
+            html_content = self._create_email_content(high_volume_anomalies, low_volume_anomalies)
             
             # Send email
             self._send_email(subject, html_content)
-            logger.info(f"Email alert sent for {len(high_conviction_anomalies)} anomalies")
+            logger.info(f"Email alert sent for {total_anomalies} anomalies ({len(high_volume_anomalies)} high volume, {len(low_volume_anomalies)} low volume)")
             return True
             
         except Exception as e:
             logger.error(f"Failed to send email alert: {e}")
             return False
     
-    def _create_email_content(self, anomalies: Dict[str, Dict]) -> str:
+    def _create_email_content(self, high_volume_anomalies: Dict[str, Dict], low_volume_anomalies: Dict[str, Dict] = None) -> str:
         """Create HTML email content with anomaly details."""
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S EST')
         
         # Sort anomalies by score descending
-        sorted_anomalies = sorted(
-            anomalies.items(), 
+        sorted_high_volume = sorted(
+            high_volume_anomalies.items(), 
+            key=lambda x: x[1].get('composite_score', 0), 
+            reverse=True
+        )
+        
+        sorted_low_volume = sorted(
+            (low_volume_anomalies or {}).items(), 
             key=lambda x: x[1].get('composite_score', 0), 
             reverse=True
         )
@@ -134,70 +146,115 @@ class EmailNotifier:
             
             <div class="summary">
                 <h2>Alert Summary</h2>
-                <p><strong>{len(sorted_anomalies)} symbols</strong> detected with high-conviction insider trading patterns (score ≥ {self.min_score}/10.0, volume > 500)</p>
+                <p><strong>{len(sorted_high_volume)} symbols</strong> detected with high-conviction insider trading patterns (score ≥ {self.min_score}/10.0, volume ≥ 500)</p>
+                {f'<p><strong>{len(sorted_low_volume)} symbols</strong> detected with high-conviction patterns but low volume (< 500)</p>' if sorted_low_volume else ''}
                 <p>These anomalies represent statistical outliers that warrant immediate investigation.</p>
                 <p><strong>View Interactive Dashboard:</strong> <a href="https://bk-insidertrades.streamlit.app" style="color: #1f77b4; text-decoration: none; font-weight: bold;">https://bk-insidertrades.streamlit.app</a></p>
             </div>
         """
         
-        # Create summary table
+        # Create summary table for high volume anomalies
+        if sorted_high_volume:
+            html += """
+                <h2>High Volume Anomalies (Volume ≥ 500)</h2>
+                <table>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Score</th>
+                        <th>Volume</th>
+                        <th>Key Indicators</th>
+                        <th>Insider Pattern</th>
+                    </tr>
+            """
+            
+            for symbol, data in sorted_high_volume:
+                html += self._create_anomaly_row(symbol, data)
+            
+            html += "</table>"
+        
+        # Create summary table for low volume anomalies
+        if sorted_low_volume:
+            html += """
+                <h2>Low Volume Anomalies (Volume < 500)</h2>
+                <table>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Score</th>
+                        <th>Volume</th>
+                        <th>Key Indicators</th>
+                        <th>Insider Pattern</th>
+                    </tr>
+            """
+            
+            for symbol, data in sorted_low_volume:
+                html += self._create_anomaly_row(symbol, data)
+            
+            html += "</table>"
+        
+        # Close HTML
         html += """
-            <h2>Anomaly Summary Table</h2>
-            <table>
-                <tr>
-                    <th>Symbol</th>
-                    <th>Score</th>
-                    <th>Key Indicators</th>
-                    <th>Insider Pattern</th>
-                </tr>
+            <div class="footer">
+                <p>This alert was generated by the Insider Trading Anomaly Detection System.</p>
+                <p>For questions or support, contact the development team.</p>
+            </div>
+        </body>
+        </html>
         """
         
-        for symbol, data in sorted_anomalies:
-            score = data.get('composite_score', 0)
-            details = data.get('details', {})
-            
-            # Extract key indicators
-            call_volume = details.get('call_volume', 0)
-            put_volume = details.get('put_volume', 0)
-            call_baseline = details.get('call_baseline_avg', 1)
-            total_volume = call_volume + put_volume
-            
-            call_multiplier = call_volume / call_baseline if call_baseline > 0 else 0
-            call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
-            
-            # Determine insider pattern
-            if call_percentage >= 80:
-                pattern = "Strong bullish insider activity"
-            elif call_percentage <= 20:
-                pattern = "Strong bearish insider activity"
-            else:
-                pattern = "Mixed directional positioning"
-                
-            open_interest_score = details.get('open_interest_score', 0)
-            open_interest_change = details.get('open_interest_multiplier', 0)
-            
-            key_indicators = f"""
-                • {call_multiplier:.1f}x normal call volume<br/>
-                • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts<br/>
-                • OTM Score: {details.get('otm_score', 0):.1f}/2.0<br/>
-                • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
-            """
-            
-            html += f"""
-                <tr>
-                    <td><strong>{symbol}</strong></td>
-                    <td class="high-score">{score:.1f}/10</td>
-                    <td>{key_indicators}</td>
-                    <td>{pattern}</td>
-                </tr>
-            """
+        return html
+    
+    def _create_anomaly_row(self, symbol: str, data: Dict[str, Any]) -> str:
+        """Create a table row for an anomaly."""
+        score = data.get('composite_score', 0)
+        details = data.get('details', {})
         
-        html += "</table>"
+        # Extract key indicators
+        call_volume = details.get('call_volume', 0)
+        put_volume = details.get('put_volume', 0)
+        call_baseline = details.get('call_baseline_avg', 1)
+        put_baseline = details.get('put_baseline_avg', 1)
+        total_volume = call_volume + put_volume
+        
+        call_multiplier = call_volume / call_baseline if call_baseline > 0 else 0
+        put_multiplier = put_volume / put_baseline if put_baseline > 0 else 0
+        call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
+        
+        # Determine insider pattern and appropriate multiplier
+        if call_percentage >= 80:
+            pattern = "Strong bullish insider activity"
+            volume_text = f"{call_multiplier:.1f}x normal call volume"
+        elif call_percentage <= 20:
+            pattern = "Strong bearish insider activity"
+            volume_text = f"{put_multiplier:.1f}x normal put volume"
+        else:
+            pattern = "Mixed directional positioning"
+            volume_text = f"{call_multiplier:.1f}x call, {put_multiplier:.1f}x put"
+            
+        open_interest_score = details.get('open_interest_score', 0)
+        open_interest_change = details.get('open_interest_multiplier', 0)
+        
+        key_indicators = f"""
+            • {volume_text}<br/>
+            • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts<br/>
+            • OTM Score: {details.get('otm_score', 0):.1f}/2.0<br/>
+            • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
+        """
+        
+        return f"""
+            <tr>
+                <td><strong>{symbol}</strong></td>
+                <td class="high-score">{score:.1f}/10</td>
+                <td>{total_volume:,}</td>
+                <td>{key_indicators}</td>
+                <td>{pattern}</td>
+            </tr>
+        """
         
         # Detailed breakdown for each anomaly
         html += "<h2>Detailed Analysis</h2>"
         
-        for symbol, data in sorted_anomalies:
+        # Process high volume anomalies first
+        for symbol, data in sorted_high_volume:
             score = data.get('composite_score', 0)
             details = data.get('details', {})
             
@@ -237,6 +294,40 @@ class EmailNotifier:
                         <div class="indicator">Open Interest: {current_open_interest:,} (vs {prior_open_interest:,} prior day)</div>
                         <div class="indicator">Open Interest Change: {open_interest_multiplier:.1f}x</div>
                     </div>
+                    
+                    <div class="indicators">
+                        <h4>Insider Trading Indicators:</h4>
+                        <div class="indicator">Statistical Significance: {volume_score:.1f}/3.0 (Z-score analysis)</div>
+                        <div class="indicator">Open Interest Surge: {open_interest_score:.1f}/2.0 (Position building)</div>
+                        <div class="indicator">OTM Call Focus: {otm_score:.1f}/2.0 (Classic insider pattern)</div>
+                        <div class="indicator">Directional Conviction: {directional_score:.1f}/1.0 (Call/put bias)</div>
+                        <div class="indicator">Timing Urgency: {time_score:.1f}/2.0 (Near-term clustering)</div>
+                    </div>
+                </div>
+            """
+        
+        # Process low volume anomalies
+        for symbol, data in sorted_low_volume:
+            score = data.get('composite_score', 0)
+            details = data.get('details', {})
+            
+            volume_score = details.get('volume_score', 0)
+            open_interest_score = details.get('open_interest_score', 0)
+            otm_score = details.get('otm_score', 0)
+            directional_score = details.get('directional_score', 0)
+            time_score = details.get('time_score', 0)
+            
+            call_volume = details.get('call_volume', 0)
+            put_volume = details.get('put_volume', 0)
+            call_baseline = details.get('call_baseline_avg', 1)
+            put_baseline = details.get('put_baseline_avg', 1)
+            current_open_interest = details.get('current_open_interest', 0)
+            prior_open_interest = details.get('prior_open_interest', 0)
+            open_interest_multiplier = details.get('open_interest_multiplier', 0)
+            
+            html += f"""
+                <div class="anomaly low-volume">
+                    <h3>{symbol} - <span class="score high-score">{score:.1f}/10.0</span> <span class="low-volume-tag">(Low Volume)</span></h3>
                     
                     <div class="indicators">
                         <h4>Insider Trading Indicators:</h4>

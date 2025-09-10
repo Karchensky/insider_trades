@@ -124,7 +124,7 @@ class InsiderAnomalyDetector:
                     LEFT JOIN latest_temp_stock s ON o.symbol = s.symbol
                     WHERE COALESCE(s.day_close, s.day_vwap, o.underlying_price, 0) > 0
                       AND o.contract_type IN ('call', 'put')
-                      AND o.expiration_date > CURRENT_DATE
+                      AND o.expiration_date >= CURRENT_DATE
                     ORDER BY o.symbol, o.contract_ticker
                 """)
                 
@@ -392,12 +392,15 @@ class InsiderAnomalyDetector:
             # Composite score (0-10 scale)
             composite_score = min(volume_score + open_interest_score + otm_score + directional_score + time_pressure_score, 10.0)
             
+            # Round composite score for consistent comparison and storage
+            rounded_composite_score = round(composite_score, 1)
+            
             # Store ALL scores in database for historical tracking
             anomaly_data = {
                 'symbol': symbol,
-                'composite_score': round(composite_score, 1),
+                'composite_score': rounded_composite_score,
                 'total_volume': total_volume,  # Add total_volume at top level for email filtering
-                'anomaly_types': ['insider_activity'] if composite_score >= 7.0 else ['low_score_activity'],
+                'anomaly_types': ['insider_activity'] if rounded_composite_score >= 7.0 else ['low_score_activity'],
                 'total_anomalies': 1,
                 'details': {
                     'volume_score': round(volume_score, 1),
@@ -424,7 +427,7 @@ class InsiderAnomalyDetector:
             all_anomaly_data.append(anomaly_data)
             
             # Only flag high-conviction cases (score >= 7.0) for notifications
-            if composite_score >= 7.0:
+            if rounded_composite_score >= 7.0:
                 high_conviction_symbols[symbol] = anomaly_data
         
         # Bulk store all anomaly data
@@ -518,24 +521,19 @@ class InsiderAnomalyDetector:
         # Calculate multiplier
         multiplier = current_open_interest / prior_open_interest
         
-        # Score based on multiplier (≥5.0x = 2.0 points)
-        if multiplier >= 5.0:
-            score = 2.0
-        elif multiplier >= 3.0:
-            score = 1.5
-        elif multiplier >= 2.0:
-            score = 1.0
-        elif multiplier >= 1.5:
-            score = 0.5
-        else:
-            score = 0.0
+        # New scoring formula: (multiplier - 1) / 2, capped at 2.0
+        # 5x = (5-1)/2 = 2.0, 3x = (3-1)/2 = 1.0, 1x = (1-1)/2 = 0.0
+        score = (multiplier - 1) / 2
+        score = max(0.0, min(score, 2.0))  # Cap between 0 and 2
         
         return score, multiplier, current_open_interest, int(prior_open_interest)
     
     def _calculate_otm_call_score_v2(self, contracts: List[Dict]) -> float:
-        """Calculate out-of-the-money call concentration score (0-2 points)."""
+        """Calculate out-of-the-money options concentration score (0-2 points) - includes both calls and puts."""
         call_contracts = [c for c in contracts if c['contract_type'] == 'call']
-        if not call_contracts:
+        put_contracts = [c for c in contracts if c['contract_type'] == 'put']
+        
+        if not call_contracts and not put_contracts:
             return 0.0
         
         # Get underlying price
@@ -548,13 +546,19 @@ class InsiderAnomalyDetector:
         if underlying_price == 0:
             return 0.0
         
-        # Calculate OTM metrics
+        # Calculate OTM call metrics
         otm_call_volume = 0
         total_call_volume = 0
-        short_term_otm_volume = 0
+        short_term_otm_call_volume = 0
+        
+        # Calculate OTM put metrics
+        otm_put_volume = 0
+        total_put_volume = 0
+        short_term_otm_put_volume = 0
         
         today = date.today()
         
+        # Process call contracts
         for contract in call_contracts:
             volume = contract['session_volume']
             strike = float(contract['strike_price']) if contract['strike_price'] else 0
@@ -572,36 +576,67 @@ class InsiderAnomalyDetector:
                 
                 days_to_exp = (exp_date - today).days
                 if days_to_exp <= 21:  # 3 weeks or less
-                    short_term_otm_volume += volume
+                    short_term_otm_call_volume += volume
         
-        if total_call_volume == 0:
-            return 0.0
+        # Process put contracts
+        for contract in put_contracts:
+            volume = contract['session_volume']
+            strike = float(contract['strike_price']) if contract['strike_price'] else 0
+            exp_date = contract['expiration_date']
+            
+            total_put_volume += volume
+            
+            # OTM puts (strike < underlying * 0.95)
+            if float(strike) < float(underlying_price) * 0.95:
+                otm_put_volume += volume
+                
+                # Short-term OTM puts (highest conviction)
+                if isinstance(exp_date, str):
+                    exp_date = datetime.strptime(exp_date, '%Y-%m-%d').date()
+                
+                days_to_exp = (exp_date - today).days
+                if days_to_exp <= 21:  # 3 weeks or less
+                    short_term_otm_put_volume += volume
         
-        otm_ratio = float(otm_call_volume) / float(total_call_volume)
-        short_term_ratio = float(short_term_otm_volume) / float(total_call_volume)
+        # Calculate call score
+        call_score = 0.0
+        if total_call_volume > 0:
+            otm_call_ratio = float(otm_call_volume) / float(total_call_volume)
+            short_term_call_ratio = float(short_term_otm_call_volume) / float(total_call_volume)
+            call_score = (otm_call_ratio * 1.0) + (short_term_call_ratio * 1.0)
         
-        # Scoring: Heavy weight on short-term OTM calls
-        score = (otm_ratio * 1.0) + (short_term_ratio * 1.0)  # Max 2.0
-        return min(score, 2.0)
+        # Calculate put score
+        put_score = 0.0
+        if total_put_volume > 0:
+            otm_put_ratio = float(otm_put_volume) / float(total_put_volume)
+            short_term_put_ratio = float(short_term_otm_put_volume) / float(total_put_volume)
+            put_score = (otm_put_ratio * 1.0) + (short_term_put_ratio * 1.0)
+        
+        # Use the score from the direction with the most volume
+        if total_call_volume > total_put_volume:
+            score = call_score
+        elif total_put_volume > total_call_volume:
+            score = put_score
+        else:
+            # If volumes are equal, use the maximum score
+            score = max(call_score, put_score)
+        
+        return min(score, 2.0)  # Cap at 2.0
     
     def _calculate_directional_bias_score_v2(self, call_volume: int, put_volume: int, total_volume: int) -> float:
-        """Calculate directional bias score (0-1 points)."""
+        """Calculate directional bias score (0-1 points) - weights call and put directions equally."""
         if total_volume == 0:
             return 0.0
         
         call_ratio = call_volume / total_volume
         
-        # Strong call bias (potential bullish insider info)
-        if call_ratio > 0.8:  # 80%+ calls
-            return 1.0
-        elif call_ratio > 0.7:  # 70%+ calls
-            return 0.8
-        elif call_ratio > 0.6:  # 60%+ calls
-            return 0.6
-        elif call_ratio < 0.2:  # 80%+ puts (bearish insider info)
-            return 0.8
-        else:
-            return 0.0
+        # Calculate distance from 0.5 (50/50 split) and multiply by 2
+        # This gives max score of 1.0 for 100% calls or 100% puts
+        # Min score of 0.0 for exactly 50/50 split
+        distance_from_50_50 = abs(call_ratio - 0.5)
+        score = distance_from_50_50 * 2
+        
+        return min(score, 1.0)  # Cap at 1.0
     
     def _calculate_time_pressure_score_v2(self, contracts: List[Dict]) -> float:
         """Calculate time pressure score based on expiration clustering (0-2 points)."""
@@ -623,7 +658,8 @@ class InsiderAnomalyDetector:
             
             if days_to_exp <= 7:  # This week
                 exp_volumes['this_week'] = exp_volumes.get('this_week', 0) + volume
-            elif days_to_exp <= 21:  # Next 3 weeks
+            
+            if days_to_exp <= 21:  # Short-term (includes this week)
                 exp_volumes['short_term'] = exp_volumes.get('short_term', 0) + volume
         
         if total_volume == 0:
@@ -691,6 +727,8 @@ class InsiderAnomalyDetector:
                     
                     # Calculate call/put ratio (cap at 9999.9999 to avoid database overflow)
                     call_put_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
+                    # Ensure the ratio doesn't exceed database precision (DECIMAL(8,4))
+                    call_put_ratio = min(call_put_ratio, 9999.9999)
                     
                     # Prepare row data
                     row_data = (

@@ -160,17 +160,18 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 - Put Score: `min(put_z_score / 3.0, 1.5)` (max 3.0 points)
 - Total: Max of call or put score
 
-#### 2. OTM Call Concentration Score (0-2 points)
+#### 2. OTM Options Concentration Score (0-2 points)
 
-**Purpose**: Identify out-of-the-money call concentration (classic insider pattern)
+**Purpose**: Identify out-of-the-money options concentration
 
 **Calculation Method**:
 
 - OTM Calls: `strike_price > underlying_price * 1.05` (5% out-of-money)
+- OTM Puts: `strike_price < underlying_price * 0.95` (5% out-of-money)
 - Short-term OTM: `expiration_date <= current_date + 21 days`
-- OTM Ratio: `otm_call_volume / total_call_volume`
-- Short-term Ratio: `short_term_otm_volume / total_call_volume`
-- Score: `(otm_ratio * 1.0) + (short_term_otm_ratio * 1.0)` (max 2.0 points)
+- Call Score: `(otm_call_ratio * 1.0) + (short_term_call_ratio * 1.0)`
+- Put Score: `(otm_put_ratio * 1.0) + (short_term_put_ratio * 1.0)`
+- Final Score: Use score from direction with most volume (calls vs puts) (max 2.0 points)
 
 **Example**: ARES with heavy short-term OTM call focus = 2.0/2.0 points
 
@@ -181,27 +182,25 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 **Calculation Method**:
 
 - Call Ratio: `call_volume / (call_volume + put_volume)`
-- Scoring Thresholds:
-  - 80%+ calls = 1.0 points (bullish insider conviction)
-  - 70-79% calls = 0.8 points
-  - 60-69% calls = 0.6 points
-  - 80%+ puts = 0.8 points (bearish insider conviction)
-  - Otherwise = 0.0 points
+- Distance from 50/50: `abs(call_ratio - 0.5)`
+- Score: `distance_from_50_50 * 2` (max 1.0 points)
+- 100% calls = 1.0 points (maximum bullish conviction)
+- 100% puts = 1.0 points (maximum bearish conviction)
+- 50/50 split = 0.0 points (no directional bias)
 
 #### 4. Open Interest Change Score (0-2 points)
 
 **Purpose**: Detect unusual increases in open interest (new positions being established)
 
 **Calculation Method**:
+
 - Current Day Open Interest: Sum of all contract open interest
 - Prior Day Open Interest: Previous trading day's total open interest
 - Multiplier: `current_open_interest / prior_open_interest`
-- Scoring Thresholds:
-  - ≥5.0x increase = 2.0 points (major new positioning)
-  - 3.0-4.9x increase = 1.5 points
-  - 2.0-2.9x increase = 1.0 points
-  - 1.5-1.9x increase = 0.5 points
-  - <1.5x increase = 0.0 points
+- New Scoring Formula: `(multiplier - 1) / 2` (capped at 2.0)
+- 5.0x increase = 2.0 points (maximum score)
+- 3.0x increase = 1.0 points
+- 1.0x increase = 0.0 points (no change)
 
 #### 5. Time Pressure Score (0-2 points)
 
@@ -223,6 +222,12 @@ Maximum Possible: 10.0 points (3+2+2+1+2)
 ```
 
 **Alert Threshold**: Only symbols with `composite_score >= 7.0` are flagged as high-conviction
+
+**Volume Filtering**:
+
+- High Volume Anomalies: Volume ≥ 500 (primary alerts)
+- Low Volume Anomalies: Volume < 500 (secondary alerts, shown separately)
+- Both categories are included in email notifications and dashboard displays
 
 **Example High-Conviction Detection**:
 
