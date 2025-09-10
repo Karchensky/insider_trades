@@ -72,7 +72,7 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
 **Schedule**: Every 15 minutes during market hours (9:30 AM - 4:00 PM EST) via GitHub Actions
 **Purpose**: Real-time insider trading detection
 
-### Step-by-Step Process
+### Intraday Step-by-Step Process
 
 1. **Stock Snapshot Collection**
 
@@ -100,7 +100,7 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
    - Includes "Insider Pattern" column indicating bear/bull direction
    - Configurable via environment variables (SMTP settings, thresholds)
 
-#### Usage
+#### Intraday Usage
 
 ```bash
 python intraday_schedule.py --retention 1 --options-limit 50000
@@ -111,7 +111,7 @@ python intraday_schedule.py --retention 1 --options-limit 50000
 **Schedule**: Daily at 8:00 AM EST (morning after business days) via GitHub Actions
 **Purpose**: Historical data archival, contract metadata management, and cleanup
 
-### Step-by-Step Process
+### Daily Step-by-Step Process
 
 1. **Stock Data Archival**
 
@@ -140,7 +140,7 @@ python intraday_schedule.py --retention 1 --options-limit 50000
    - Removes `daily_anomaly_snapshot` records older than retention period
    - Uses bulk operations for efficiency
 
-#### Usage
+#### Daily Usage
 
 ```bash
 python daily_schedule.py --recent 3 --retention 30 --ticker-limit 1000
