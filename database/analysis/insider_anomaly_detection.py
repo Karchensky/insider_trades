@@ -691,6 +691,7 @@ class InsiderAnomalyDetector:
                     
                     # Calculate call/put ratio (cap at 9999.9999 to avoid database overflow)
                     call_put_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
+                    call_put_ratio = min(call_put_ratio, 9999.9999) # sets the min value to 9999.9999
                     
                     # Prepare row data
                     row_data = (
