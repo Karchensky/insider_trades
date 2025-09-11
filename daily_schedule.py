@@ -116,18 +116,6 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
         cur += _td(days=1)
 
     logger.info("[anomaly_retention] Keeping daily_anomaly_snapshot data for ongoing analysis")
-    
-    # Clean up old daily_anomaly_snapshot data using retention
-    try:
-        from database.core.connection import db as _db
-        conn = _db.connect()
-        with conn.cursor() as cur:
-            cur.execute("SELECT cleanup_old_anomalies(%s);", (anomaly_retention,))
-            deleted_count = cur.fetchone()[0]
-            conn.commit()
-        logger.info(f"[anomaly_retention] Cleaned up {deleted_count} old anomaly records ({anomaly_retention}+ days)")
-    except Exception as ae:
-        logger.error(f"[anomaly_retention] Failed to cleanup old anomaly data: {ae}")
 
     # Truncate temp_option and temp_stock to keep only fresh intraday going forward
     # Note: daily_anomaly_snapshot is NOT truncated to preserve ongoing anomaly analysis
@@ -159,7 +147,7 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     except Exception as e:
         logger.error(f"✗ Failed to truncate temp tables: {e}")
     
-    # Step 6: Retention cleanup for historical and anomaly data
+    # Step 6: Retention cleanup for all historical data
     tables_to_clean = [
         ('daily_stock_snapshot', 'date', False),
         ('daily_option_snapshot', 'date', False),
