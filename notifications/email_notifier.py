@@ -358,7 +358,7 @@ class EmailNotifier:
         return html
     
     def _send_email(self, subject: str, html_content: str):
-        """Send the email using SMTP to multiple recipients."""
+        """Send the email using SMTP to multiple recipients via BCC."""
         if not self.smtp_user or not self.smtp_pass or not self.to_emails:
             raise ValueError("Missing required email configuration (SENDER_EMAIL, EMAIL_PASSWORD, RECIPIENT_EMAIL)")
         
@@ -366,7 +366,10 @@ class EmailNotifier:
         msg = MimeMultipart('alternative')
         msg['Subject'] = subject
         msg['From'] = self.from_email
-        msg['To'] = ', '.join(self.to_emails)  # Join multiple recipients for display
+        msg['To'] = self.from_email  # Send to self, recipients in BCC
+        
+        # Add BCC recipients
+        msg['Bcc'] = ', '.join(self.to_emails)
         
         # Add HTML content
         html_part = MimeText(html_content, 'html')
@@ -377,14 +380,14 @@ class EmailNotifier:
             # Use SMTP_SSL for port 465
             with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port) as server:
                 server.login(self.smtp_user, self.smtp_pass)
-                server.send_message(msg, to_addrs=self.to_emails)  # Send to all recipients
+                server.send_message(msg, to_addrs=[self.from_email] + self.to_emails)  # Include BCC recipients
         else:
             # Use SMTP with STARTTLS for port 587
             with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
                 if self.use_tls:
                     server.starttls()
                 server.login(self.smtp_user, self.smtp_pass)
-                server.send_message(msg, to_addrs=self.to_emails)  # Send to all recipients
+                server.send_message(msg, to_addrs=[self.from_email] + self.to_emails)  # Include BCC recipients
     
     def test_connection(self) -> bool:
         """Test email configuration and connection."""
