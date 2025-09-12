@@ -22,9 +22,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from database.core.connection import db
     from dashboard_functions import (
-        get_current_anomalies, get_symbol_history, get_anomaly_timeline,
-        create_anomaly_summary_table, create_anomaly_summary_by_date, create_symbol_analysis, create_anomaly_timeline_chart,
-        get_available_symbols, create_options_heatmaps, create_contracts_table, create_basic_symbol_analysis
+        get_current_anomalies, get_symbol_history,
+        create_anomaly_summary_table, create_anomaly_summary_by_date, create_symbol_analysis,
+        get_available_symbols, create_options_heatmaps, create_contracts_table, create_basic_symbol_analysis, get_symbol_anomaly_data,
+        create_performance_matrix
     )
     DATABASE_AVAILABLE = True
 except Exception as e:
@@ -67,9 +68,14 @@ def main():
     # Sidebar Configuration
     st.sidebar.header("Navigation")
     
-    # Get current anomalies and available symbols
-    anomalies_df = get_current_anomalies()
-    available_symbols = get_available_symbols()
+    # Get current anomalies and available symbols (cached for performance)
+    if 'anomalies_df' not in st.session_state:
+        st.session_state.anomalies_df = get_current_anomalies()
+    if 'available_symbols' not in st.session_state:
+        st.session_state.available_symbols = get_available_symbols()
+    
+    anomalies_df = st.session_state.anomalies_df
+    available_symbols = st.session_state.available_symbols
     
     # Check for symbol selection from URL parameters or session state
     if 'symbol' in st.query_params:
@@ -85,7 +91,7 @@ def main():
     # Show anomaly symbols first, then others
     anomaly_symbols = anomalies_df['symbol'].unique().tolist() if not anomalies_df.empty else []
     other_symbols = [s for s in available_symbols if s not in anomaly_symbols]
-    all_symbols = ['Overview'] + anomaly_symbols + other_symbols[:50]  # Limit to first 50 others for performance
+    all_symbols = ['Overview'] + anomaly_symbols + other_symbols  # Show all available symbols
     
     # If we have a selected symbol from URL/session, make sure it's in the list
     if selected_symbol and selected_symbol not in all_symbols:
@@ -97,23 +103,27 @@ def main():
         index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0
     )
     
-    # Return to Summary button
-    if selected_symbol and selected_symbol != 'Overview':
-        if st.sidebar.button("Return to Summary"):
-            st.session_state.selected_symbol = 'Overview'
-            st.rerun()
-    
     # Date selector for analysis
     selected_date = None
     if selected_symbol and selected_symbol != 'Overview':
-        st.sidebar.subheader("Analysis Options")
         selected_date = st.sidebar.date_input(
             "Select Date for Analysis",
             value=date.today(),
             max_value=date.today()
         )
     
+    # Buttons
+    if selected_symbol and selected_symbol != 'Overview':
+        if st.sidebar.button("Return to Summary"):
+            st.session_state.selected_symbol = 'Overview'
+            st.rerun()
+    
     if st.sidebar.button("Refresh Data"):
+        # Clear cached data
+        if 'anomalies_df' in st.session_state:
+            del st.session_state.anomalies_df
+        if 'available_symbols' in st.session_state:
+            del st.session_state.available_symbols
         st.rerun()
     
     # Main content
@@ -121,8 +131,11 @@ def main():
         # Show anomaly overview
         if not anomalies_df.empty:
             create_anomaly_summary_by_date(anomalies_df)
-            timeline_df = get_anomaly_timeline()
-            create_anomaly_timeline_chart(timeline_df)
+            
+            # Performance matrix
+            st.markdown("---")
+            create_performance_matrix()
+            
         else:
             st.info("No high-conviction anomalies detected in the past 7 days.")
             st.markdown("""
@@ -137,38 +150,14 @@ def main():
             - Email notifications are sent automatically when anomalies are found
             """)
     else:
-        # Show symbol analysis
-        st.subheader(f"Analysis for {selected_symbol}")
+        # Check if this symbol has anomalies for the selected date
+        symbol_anomaly_data = get_symbol_anomaly_data(selected_symbol, selected_date)
         
-        # Check if this symbol has anomalies
-        if not anomalies_df.empty and selected_symbol in anomalies_df['symbol'].values:
-            symbol_anomaly = anomalies_df[anomalies_df['symbol'] == selected_symbol].iloc[0]
-            # Build anomaly data from new table structure
-            anomaly_data = {
-                'composite_score': float(symbol_anomaly['total_score']),
-                'details': {
-                    'volume_score': float(symbol_anomaly.get('volume_score', 0)),
-                    'open_interest_score': float(symbol_anomaly.get('open_interest_score', 0)),
-                    'otm_score': float(symbol_anomaly.get('otm_score', 0)),
-                    'directional_score': float(symbol_anomaly.get('directional_score', 0)),
-                    'time_score': float(symbol_anomaly.get('time_score', 0)),
-                    'call_volume': int(symbol_anomaly.get('call_volume', 0)),
-                    'put_volume': int(symbol_anomaly.get('put_volume', 0)),
-                    'total_volume': int(symbol_anomaly.get('total_volume', 0)),
-                    'call_baseline_avg': float(symbol_anomaly.get('call_baseline_avg', 0)),
-                    'put_baseline_avg': float(symbol_anomaly.get('put_baseline_avg', 0)),
-                    'call_multiplier': float(symbol_anomaly.get('call_multiplier', 0)),
-                    'current_open_interest': int(symbol_anomaly.get('open_interest', 0)),
-                    'prior_open_interest': int(symbol_anomaly.get('prior_open_interest', 0)),
-                    'open_interest_multiplier': float(symbol_anomaly.get('open_interest_change', 0)),
-                    'pattern_description': symbol_anomaly.get('pattern_description', 'Unusual trading pattern'),
-                    'z_score': float(symbol_anomaly.get('z_score', 0))
-                }
-            }
-            create_symbol_analysis(selected_symbol, anomaly_data)
+        if symbol_anomaly_data:
+            create_symbol_analysis(selected_symbol, symbol_anomaly_data, selected_date)
         else:
             # Show basic symbol analysis without anomaly data
-            create_basic_symbol_analysis(selected_symbol)
+            create_basic_symbol_analysis(selected_symbol, selected_date)
         
         # Add contracts table section
         st.markdown("---")

@@ -5,18 +5,21 @@ Dashboard support functions for Streamlit app
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sys
 import os
 from typing import Dict, List, Any
 from datetime import date, datetime, timedelta
+import time
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database.core.connection import db
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_current_anomalies() -> pd.DataFrame:
     """Get current high-conviction anomalies from daily_anomaly_snapshot table."""
     conn = db.connect()
@@ -84,6 +87,7 @@ def get_current_anomalies() -> pd.DataFrame:
     finally:
         conn.close()
 
+@st.cache_data(ttl=180)  # Cache for 3 minutes
 def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
     """Get historical data for a specific symbol."""
     conn = db.connect()
@@ -190,6 +194,7 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
     finally:
         conn.close()
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_anomaly_timeline(days: int = 7) -> pd.DataFrame:
     """Get timeline of anomalies over the past N days."""
     conn = db.connect()
@@ -525,11 +530,42 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
             # Create DataFrame for display
             display_df = pd.DataFrame(display_data)
             
-            # Style the table
+            # Style the table with column configuration
             st.dataframe(
                 display_df,
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
+                column_config={
+                    "Key Indicators": st.column_config.TextColumn(
+                        "Key Indicators",
+                        width="large",
+                        help="Detailed trading indicators and metrics"
+                    ),
+                    "Symbol": st.column_config.TextColumn(
+                        "Symbol",
+                        width="small"
+                    ),
+                    "Score": st.column_config.TextColumn(
+                        "Score",
+                        width="small"
+                    ),
+                    "Volume": st.column_config.TextColumn(
+                        "Volume",
+                        width="small"
+                    ),
+                    "Open Interest": st.column_config.TextColumn(
+                        "Open Interest",
+                        width="small"
+                    ),
+                    "Insider Pattern": st.column_config.TextColumn(
+                        "Insider Pattern",
+                        width="small"
+                    ),
+                    "Timestamp": st.column_config.TextColumn(
+                        "Timestamp",
+                        width="small"
+                    )
+                }
             )
         
         # Process low volume anomalies
@@ -598,17 +634,48 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
             # Create DataFrame for display
             display_df = pd.DataFrame(display_data)
             
-            # Style the table
+            # Style the table with column configuration
             st.dataframe(
                 display_df,
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
+                column_config={
+                    "Key Indicators": st.column_config.TextColumn(
+                        "Key Indicators",
+                        width="large",
+                        help="Detailed trading indicators and metrics"
+                    ),
+                    "Symbol": st.column_config.TextColumn(
+                        "Symbol",
+                        width="small"
+                    ),
+                    "Score": st.column_config.TextColumn(
+                        "Score",
+                        width="small"
+                    ),
+                    "Volume": st.column_config.TextColumn(
+                        "Volume",
+                        width="small"
+                    ),
+                    "Open Interest": st.column_config.TextColumn(
+                        "Open Interest",
+                        width="small"
+                    ),
+                    "Insider Pattern": st.column_config.TextColumn(
+                        "Insider Pattern",
+                        width="small"
+                    ),
+                    "Timestamp": st.column_config.TextColumn(
+                        "Timestamp",
+                        width="small"
+                    )
+                }
             )
         
         # Add some spacing between date groups
         st.markdown("---")
 
-def create_symbol_analysis(symbol: str, anomaly_data: Dict) -> None:
+def create_symbol_analysis(symbol: str, anomaly_data: Dict, selected_date: date = None) -> None:
     """Create detailed analysis for a specific symbol."""
     st.header(f"Deep Dive Analysis: {symbol}")
     
@@ -823,6 +890,256 @@ def create_options_activity_chart(options_df: pd.DataFrame, symbol: str) -> None
     
     st.plotly_chart(fig, use_container_width=True)
 
+def get_performance_matrix_data() -> pd.DataFrame:
+    """Get performance matrix data showing price movements after anomalies."""
+    conn = db.connect()
+    try:
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        query = """
+            WITH base AS (
+                SELECT DISTINCT ON (a.symbol) 
+                    a.symbol, 
+                    a.total_score, 
+                    a.event_date, 
+                    a.total_volume, 
+                    b.weighted_average_price as weighted_average_price, 
+                    a.direction
+                FROM daily_anomaly_snapshot a
+                INNER JOIN daily_stock_snapshot b
+                    ON a.symbol = b.symbol
+                    AND a.event_date = b.date
+                WHERE a.total_score >= 7.0
+                ORDER BY a.symbol, a.event_date
+            )
+            SELECT 
+                a.symbol,
+                a.total_score,
+                a.direction,
+                CASE WHEN a.total_volume >= 500 THEN 'High' ELSE 'Low' END as volume_type,
+                b.date - a.event_date as day_number,
+                b.close as close_price,
+                a.weighted_average_price as starting_price
+            FROM base a
+            LEFT JOIN daily_stock_snapshot b 
+                ON a.symbol = b.symbol
+                AND b.date >= a.event_date
+                AND b.date <= a.event_date + INTERVAL '30 days'
+            WHERE b.date IS NOT NULL
+            ORDER BY a.symbol, day_number
+        """
+        
+        cur.execute(query)
+        rows = cur.fetchall()
+        
+        df = pd.DataFrame([dict(row) for row in rows]) if rows else pd.DataFrame()
+        return df
+        
+    except Exception as e:
+        st.error(f"Error fetching performance matrix data: {e}")
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+def create_performance_matrix() -> None:
+    """Create performance matrix showing price movements after anomalies."""
+    st.subheader("Performance Matrix")
+    st.write("Price movements after anomaly detection (30 days)")
+    
+    # Get performance data
+    perf_df = get_performance_matrix_data()
+    
+    if perf_df.empty:
+        st.info("No performance data available")
+        return
+    
+    # Calculate price movement percentage
+    perf_df['price_movement'] = ((perf_df['close_price'] - perf_df['starting_price']) / perf_df['starting_price']) * 100
+    
+    # Create pivot table
+    pivot_df = perf_df.pivot_table(
+        index=['symbol', 'direction', 'volume_type'],
+        columns='day_number',
+        values='price_movement',
+        aggfunc='first'
+    ).fillna(0)
+    
+    # Round scores to nearest 0.5 for grouping
+    score_mapping = {}
+    for symbol in perf_df['symbol'].unique():
+        symbol_data = perf_df[perf_df['symbol'] == symbol]
+        if not symbol_data.empty:
+            score = symbol_data['total_score'].iloc[0]
+            score_mapping[symbol] = round(score * 2) / 2
+    
+    pivot_df['score_group'] = pivot_df.index.get_level_values(0).map(score_mapping)
+    
+    # Reset index to make it easier to work with
+    pivot_df = pivot_df.reset_index()
+    
+    # Create score groups for filtering
+    score_mapping = {}
+    for symbol in perf_df['symbol'].unique():
+        symbol_data = perf_df[perf_df['symbol'] == symbol]
+        if not symbol_data.empty:
+            score = symbol_data['total_score'].iloc[0]
+            score_mapping[symbol] = round(score * 2) / 2
+    
+    perf_df['score_group'] = perf_df['symbol'].map(score_mapping)
+    
+    # Always use symbol as row dimension
+    selected_row = 'symbol'
+    
+    # Always show all filters
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Symbol filter
+        available_symbols = sorted(perf_df['symbol'].unique())
+        selected_symbols = st.multiselect("Filter by Symbol", available_symbols, default=available_symbols)
+        
+        # Direction filter
+        available_directions = sorted(perf_df['direction'].unique())
+        selected_directions = st.multiselect("Filter by Direction", available_directions, default=available_directions)
+    
+    with col2:
+        # Volume Type filter
+        available_volume_types = sorted(perf_df['volume_type'].unique())
+        selected_volume_types = st.multiselect("Filter by Volume Type", available_volume_types, default=available_volume_types)
+        
+        # Score Group filter
+        available_score_groups = sorted(perf_df['score_group'].unique())
+        selected_score_groups = st.multiselect("Filter by Score Group", available_score_groups, default=available_score_groups)
+    
+    # Apply all filters
+    perf_df = perf_df[
+        (perf_df['symbol'].isin(selected_symbols)) &
+        (perf_df['direction'].isin(selected_directions)) &
+        (perf_df['volume_type'].isin(selected_volume_types)) &
+        (perf_df['score_group'].isin(selected_score_groups))
+    ]
+    
+    # Create final pivot table (always use symbol as index)
+    final_pivot = perf_df.pivot_table(
+        index='symbol',
+        columns='day_number',
+        values='price_movement',
+        aggfunc='first'
+    ).fillna(0)
+    
+    # Format column names
+    final_pivot.columns = [f"Day {int(col)}" for col in final_pivot.columns]
+    
+    # Clean the data first - replace extreme values with 0
+    final_pivot_clean = final_pivot.copy()
+    final_pivot_clean = final_pivot_clean.replace([np.inf, -np.inf], 0)
+    final_pivot_clean = final_pivot_clean.where(abs(final_pivot_clean) < 1e6, 0)
+    
+    # Format the display to show percentages
+    styled_df = final_pivot_clean.style.format(lambda x: f"{x:.2f}%" if pd.notna(x) else "0.00%")
+    
+    st.dataframe(
+        styled_df,
+        use_container_width=True,
+        height=min(600, 200 + len(final_pivot) * 30)
+    )
+    
+    # Add time series chart
+    create_performance_timeseries_chart(perf_df, 'symbol')
+
+def create_performance_timeseries_chart(perf_df: pd.DataFrame, selected_row: str) -> None:
+    """Create time series chart showing performance over time."""
+    if perf_df.empty:
+        return
+    
+    st.subheader("Performance Time Series")
+    
+    # Prepare data for plotting
+    if selected_row == 'symbol':
+        # Group by symbol and day_number
+        plot_data = perf_df.groupby(['symbol', 'day_number'])['price_movement'].mean().reset_index()
+        
+        fig = go.Figure()
+        for symbol in plot_data['symbol'].unique():
+            symbol_data = plot_data[plot_data['symbol'] == symbol]
+            fig.add_trace(go.Scatter(
+                x=symbol_data['day_number'],
+                y=symbol_data['price_movement'],
+                mode='lines+markers',
+                name=symbol,
+                line=dict(width=2),
+                hovertemplate='%{fullData.name}: %{y:.2f}%<extra></extra>'
+            ))
+    elif selected_row == 'direction':
+        # Group by direction and day_number
+        plot_data = perf_df.groupby(['direction', 'day_number'])['price_movement'].mean().reset_index()
+        
+        fig = go.Figure()
+        for direction in plot_data['direction'].unique():
+            direction_data = plot_data[plot_data['direction'] == direction]
+            fig.add_trace(go.Scatter(
+                x=direction_data['day_number'],
+                y=direction_data['price_movement'],
+                mode='lines+markers',
+                name=direction,
+                line=dict(width=3),
+                hovertemplate='%{fullData.name}: %{y:.2f}%<extra></extra>'
+            ))
+    elif selected_row == 'volume_type':
+        # Group by volume_type and day_number
+        plot_data = perf_df.groupby(['volume_type', 'day_number'])['price_movement'].mean().reset_index()
+        
+        fig = go.Figure()
+        for volume_type in plot_data['volume_type'].unique():
+            volume_data = plot_data[plot_data['volume_type'] == volume_type]
+            fig.add_trace(go.Scatter(
+                x=volume_data['day_number'],
+                y=volume_data['price_movement'],
+                mode='lines+markers',
+                name=f"{volume_type} Volume",
+                line=dict(width=3),
+                hovertemplate='%{fullData.name}: %{y:.2f}%<extra></extra>'
+            ))
+    else:  # score_group
+        # Group by score_group and day_number
+        score_mapping = {}
+        for symbol in perf_df['symbol'].unique():
+            symbol_data = perf_df[perf_df['symbol'] == symbol]
+            if not symbol_data.empty:
+                score = symbol_data['total_score'].iloc[0]
+                score_mapping[symbol] = round(score * 2) / 2
+        
+        perf_df['score_group'] = perf_df['symbol'].map(score_mapping)
+        plot_data = perf_df.groupby(['score_group', 'day_number'])['price_movement'].mean().reset_index()
+        
+        fig = go.Figure()
+        for score_group in sorted(plot_data['score_group'].unique()):
+            score_data = plot_data[plot_data['score_group'] == score_group]
+            fig.add_trace(go.Scatter(
+                x=score_data['day_number'],
+                y=score_data['price_movement'],
+                mode='lines+markers',
+                name=f"Score {score_group}",
+                line=dict(width=3),
+                hovertemplate='%{fullData.name}: %{y:.2f}%<extra></extra>'
+            ))
+    
+    # Update layout
+    fig.update_layout(
+        title=f"Performance Over Time - {selected_row.title()}",
+        xaxis_title="Days After Anomaly",
+        yaxis_title="Price Movement (%)",
+        height=500,
+        hovermode='x unified',
+        showlegend=True
+    )
+    
+    # Add horizontal line at 0%
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+    
+    st.plotly_chart(fig, use_container_width=True)
+
 def create_anomaly_timeline_chart(timeline_df: pd.DataFrame) -> None:
     """Create anomaly detection timeline chart."""
     if timeline_df.empty:
@@ -866,6 +1183,7 @@ def create_anomaly_timeline_chart(timeline_df: pd.DataFrame) -> None:
     
     st.plotly_chart(fig, use_container_width=True)
 
+@st.cache_data(ttl=120)  # Cache for 2 minutes
 def get_options_heatmap_data(symbol: str, target_date: date = None) -> pd.DataFrame:
     """Get options data for heatmap visualization by strike and expiration."""
     conn = db.connect()
@@ -944,6 +1262,7 @@ def get_options_heatmap_data(symbol: str, target_date: date = None) -> pd.DataFr
     finally:
         conn.close()
 
+@st.cache_data(ttl=600)  # Cache for 10 minutes
 def get_available_symbols() -> List[str]:
     """Get list of all available symbols for search."""
     conn = db.connect()
@@ -954,13 +1273,7 @@ def get_available_symbols() -> List[str]:
         # Get symbols from multiple tables
         query = """
             SELECT DISTINCT symbol FROM (
-                SELECT symbol FROM daily_stock_snapshot
-                UNION
-                SELECT symbol FROM temp_stock
-                UNION 
                 SELECT symbol FROM daily_option_snapshot
-                UNION
-                SELECT symbol FROM temp_option
             ) symbols
             ORDER BY symbol
         """
@@ -1050,6 +1363,7 @@ def create_options_heatmaps(symbol: str, target_date: date = None) -> None:
     
     st.plotly_chart(fig, use_container_width=True)
 
+@st.cache_data(ttl=120)  # Cache for 2 minutes
 def get_contract_details(symbol: str, target_date: date = None) -> pd.DataFrame:
     """Get detailed contract information for a symbol, ordered by volume."""
     conn = db.connect()
@@ -1338,13 +1652,17 @@ def get_consolidated_symbol_data(symbol: str, target_date: date = None) -> Dict[
     finally:
         conn.close()
 
-def get_symbol_anomaly_data(symbol: str) -> Dict[str, Any]:
+@st.cache_data(ttl=180)  # Cache for 3 minutes
+def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, Any]:
     """Get anomaly data for a symbol even if below 7.0 threshold."""
     conn = db.connect()
     try:
         import psycopg2.extras
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
+        if target_date is None:
+            target_date = date.today()
+            
         query = """
             SELECT 
                 symbol,
@@ -1373,12 +1691,12 @@ def get_symbol_anomaly_data(symbol: str) -> Dict[str, Any]:
                 open_interest,
                 prior_open_interest
             FROM daily_anomaly_snapshot
-            WHERE symbol = %s
+            WHERE symbol = %s AND event_date = %s
             ORDER BY as_of_timestamp DESC
             LIMIT 1
         """
         
-        cur.execute(query, (symbol,))
+        cur.execute(query, (symbol, target_date))
         row = cur.fetchone()
         
         if not row:
@@ -1462,7 +1780,7 @@ def create_combined_price_volume_chart(stock_df: pd.DataFrame, symbol: str) -> N
     
     st.plotly_chart(fig, use_container_width=True)
 
-def create_basic_symbol_analysis(symbol: str) -> None:
+def create_basic_symbol_analysis(symbol: str, selected_date: date = None) -> None:
     """Create basic analysis for a symbol without anomaly data."""
     st.header(f"Analysis: {symbol}")
     
@@ -1474,7 +1792,7 @@ def create_basic_symbol_analysis(symbol: str) -> None:
         return
     
     # Get anomaly data for this symbol (even if below 7.0 threshold)
-    anomaly_data = get_symbol_anomaly_data(symbol)
+    anomaly_data = get_symbol_anomaly_data(symbol, selected_date)
     
     if anomaly_data:
         # Show anomaly scores even if below 7.0
