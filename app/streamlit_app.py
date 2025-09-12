@@ -24,7 +24,7 @@ try:
     from dashboard_functions import (
         get_current_anomalies, get_symbol_history, get_anomaly_timeline,
         create_anomaly_summary_table, create_anomaly_summary_by_date, create_symbol_analysis, create_anomaly_timeline_chart,
-        get_available_symbols, create_options_heatmaps, create_contracts_table
+        get_available_symbols, create_options_heatmaps, create_contracts_table, create_basic_symbol_analysis
     )
     DATABASE_AVAILABLE = True
 except Exception as e:
@@ -67,71 +67,67 @@ def main():
     # Sidebar Configuration
     st.sidebar.header("Navigation")
     
-    # Mode Selection
-    mode = st.sidebar.radio("Mode", ["Anomalies", "Symbol Search"])
+    # Get current anomalies and available symbols
+    anomalies_df = get_current_anomalies()
+    available_symbols = get_available_symbols()
     
-    if mode == "Anomalies":
-        # Get current anomalies
-        anomalies_df = get_current_anomalies()
+    # Check for symbol selection from URL parameters or session state
+    if 'symbol' in st.query_params:
+        selected_symbol = st.query_params['symbol']
+    elif 'selected_symbol' in st.session_state:
+        selected_symbol = st.session_state.selected_symbol
+    else:
+        selected_symbol = None
+    
+    # Unified symbol selection
+    st.sidebar.subheader("Symbol Selection")
+    
+    # Symbol search
+    search_term = st.sidebar.text_input("Search Symbol", "").upper()
+    
+    if search_term:
+        matching_symbols = [s for s in available_symbols if search_term in s]
+        if matching_symbols:
+            selected_symbol = st.sidebar.selectbox("Select Symbol", matching_symbols)
+        else:
+            st.warning(f"No symbols found matching '{search_term}'")
+            selected_symbol = None
+    else:
+        # Show anomaly symbols first, then others
+        anomaly_symbols = anomalies_df['symbol'].unique().tolist() if not anomalies_df.empty else []
+        other_symbols = [s for s in available_symbols if s not in anomaly_symbols]
+        all_symbols = ['Overview'] + anomaly_symbols + other_symbols[:50]  # Limit to first 50 others for performance
         
+        # If we have a selected symbol from URL/session, make sure it's in the list
+        if selected_symbol and selected_symbol not in all_symbols:
+            all_symbols = [selected_symbol] + all_symbols
+        
+        selected_symbol = st.sidebar.selectbox(
+            "Select Symbol for Analysis",
+            all_symbols,
+            index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0
+        )
+    
+    # Date selector for analysis
+    selected_date = None
+    if selected_symbol and selected_symbol != 'Overview':
+        st.sidebar.subheader("Analysis Options")
+        selected_date = st.sidebar.date_input(
+            "Select Date for Analysis",
+            value=date.today(),
+            max_value=date.today()
+        )
+    
+    if st.sidebar.button("Refresh Data"):
+        st.rerun()
+    
+    # Main content
+    if not selected_symbol or selected_symbol == 'Overview':
+        # Show anomaly overview
         if not anomalies_df.empty:
-            symbols = anomalies_df['symbol'].unique().tolist()
-            selected_symbol = st.sidebar.selectbox(
-                "Select Symbol for Deep Dive",
-                ['Overview'] + symbols
-            )
-            
-            # Date selector for heatmaps (when not in Overview mode)
-            selected_date = None
-            if selected_symbol != 'Overview':
-                st.sidebar.subheader("Heatmap Options")
-                selected_date = st.sidebar.date_input(
-                    "Select Date for Heatmaps",
-                    value=date.today(),
-                    max_value=date.today()
-                )
-            
-            if st.sidebar.button("Refresh Data"):
-                st.rerun()
-            
-            # Main content
-            if selected_symbol == 'Overview':
-                create_anomaly_summary_by_date(anomalies_df)
-                timeline_df = get_anomaly_timeline()
-                create_anomaly_timeline_chart(timeline_df)
-            else:
-                symbol_anomaly = anomalies_df[anomalies_df['symbol'] == selected_symbol].iloc[0]
-                # Build anomaly data from new table structure
-                anomaly_data = {
-                    'composite_score': float(symbol_anomaly['total_score']),
-                    'details': {
-                        'volume_score': float(symbol_anomaly.get('volume_score', 0)),
-                        'open_interest_score': float(symbol_anomaly.get('open_interest_score', 0)),
-                        'otm_score': float(symbol_anomaly.get('otm_score', 0)),
-                        'directional_score': float(symbol_anomaly.get('directional_score', 0)),
-                        'time_score': float(symbol_anomaly.get('time_score', 0)),
-                        'call_volume': int(symbol_anomaly.get('call_volume', 0)),
-                        'put_volume': int(symbol_anomaly.get('put_volume', 0)),
-                        'total_volume': int(symbol_anomaly.get('total_volume', 0)),
-                        'call_baseline_avg': float(symbol_anomaly.get('call_baseline_avg', 0)),
-                        'put_baseline_avg': float(symbol_anomaly.get('put_baseline_avg', 0)),
-                        'call_multiplier': float(symbol_anomaly.get('call_multiplier', 0)),
-                        'current_open_interest': int(symbol_anomaly.get('open_interest', 0)),
-                        'prior_open_interest': int(symbol_anomaly.get('prior_open_interest', 0)),
-                        'open_interest_multiplier': float(symbol_anomaly.get('open_interest_change', 0)),
-                        'pattern_description': symbol_anomaly.get('pattern_description', 'Unusual trading pattern'),
-                        'z_score': float(symbol_anomaly.get('z_score', 0))
-                    }
-                }
-                create_symbol_analysis(selected_symbol, anomaly_data)
-                
-                # Add contracts table section
-                st.markdown("---")
-                create_contracts_table(selected_symbol, selected_date)
-                
-                # Add heatmaps section
-                st.markdown("---")
-                create_options_heatmaps(selected_symbol, selected_date)
+            create_anomaly_summary_by_date(anomalies_df)
+            timeline_df = get_anomaly_timeline()
+            create_anomaly_timeline_chart(timeline_df)
         else:
             st.info("No high-conviction anomalies detected in the past 7 days.")
             st.markdown("""
@@ -145,63 +141,47 @@ def main():
             - Anomalies are detected every 15 minutes during trading hours
             - Email notifications are sent automatically when anomalies are found
             """)
-    
-    else:  # Symbol Search mode
-        st.sidebar.subheader("Symbol Search")
+    else:
+        # Show symbol analysis
+        st.subheader(f"Analysis for {selected_symbol}")
         
-        # Get available symbols
-        available_symbols = get_available_symbols()
-        
-        # Symbol search
-        search_term = st.sidebar.text_input("Search Symbol", "").upper()
-        
-        if search_term:
-            matching_symbols = [s for s in available_symbols if search_term in s]
-            if matching_symbols:
-                selected_symbol = st.sidebar.selectbox("Select Symbol", matching_symbols)
-                
-                # Date selector for heatmaps
-                st.sidebar.subheader("Analysis Options")
-                selected_date = st.sidebar.date_input(
-                    "Select Date for Analysis",
-                    value=date.today(),
-                    max_value=date.today()
-                )
-                
-                # Display symbol analysis
-                st.subheader(f"Analysis for {selected_symbol}")
-                
-                # Check if this symbol has anomalies
-                anomalies_df = get_current_anomalies()
-                if not anomalies_df.empty and selected_symbol in anomalies_df['symbol'].values:
-                    st.info("This symbol has current anomalies! Check the Anomalies tab for detailed analysis.")
-                
-                # Show contracts table
-                create_contracts_table(selected_symbol, selected_date)
-                
-                # Show heatmaps
-                st.markdown("---")
-                create_options_heatmaps(selected_symbol, selected_date)
-                
-                # Show historical data
-                st.markdown("---")
-                history = get_symbol_history(selected_symbol)
-                if not history['stock'].empty:
-                    st.subheader("Price History")
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
-                        x=history['stock']['date'],
-                        y=history['stock']['close'],
-                        mode='lines',
-                        name='Close Price'
-                    ))
-                    fig.update_layout(title=f"{selected_symbol} Price History", xaxis_title="Date", yaxis_title="Price")
-                    st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning(f"No symbols found matching '{search_term}'")
+        # Check if this symbol has anomalies
+        if not anomalies_df.empty and selected_symbol in anomalies_df['symbol'].values:
+            symbol_anomaly = anomalies_df[anomalies_df['symbol'] == selected_symbol].iloc[0]
+            # Build anomaly data from new table structure
+            anomaly_data = {
+                'composite_score': float(symbol_anomaly['total_score']),
+                'details': {
+                    'volume_score': float(symbol_anomaly.get('volume_score', 0)),
+                    'open_interest_score': float(symbol_anomaly.get('open_interest_score', 0)),
+                    'otm_score': float(symbol_anomaly.get('otm_score', 0)),
+                    'directional_score': float(symbol_anomaly.get('directional_score', 0)),
+                    'time_score': float(symbol_anomaly.get('time_score', 0)),
+                    'call_volume': int(symbol_anomaly.get('call_volume', 0)),
+                    'put_volume': int(symbol_anomaly.get('put_volume', 0)),
+                    'total_volume': int(symbol_anomaly.get('total_volume', 0)),
+                    'call_baseline_avg': float(symbol_anomaly.get('call_baseline_avg', 0)),
+                    'put_baseline_avg': float(symbol_anomaly.get('put_baseline_avg', 0)),
+                    'call_multiplier': float(symbol_anomaly.get('call_multiplier', 0)),
+                    'current_open_interest': int(symbol_anomaly.get('open_interest', 0)),
+                    'prior_open_interest': int(symbol_anomaly.get('prior_open_interest', 0)),
+                    'open_interest_multiplier': float(symbol_anomaly.get('open_interest_change', 0)),
+                    'pattern_description': symbol_anomaly.get('pattern_description', 'Unusual trading pattern'),
+                    'z_score': float(symbol_anomaly.get('z_score', 0))
+                }
+            }
+            create_symbol_analysis(selected_symbol, anomaly_data)
         else:
-            st.info("Enter a symbol to search for analysis")
-            st.write(f"Available symbols: {len(available_symbols)} total")
+            # Show basic symbol analysis without anomaly data
+            create_basic_symbol_analysis(selected_symbol)
+        
+        # Add contracts table section
+        st.markdown("---")
+        create_contracts_table(selected_symbol, selected_date)
+        
+        # Add heatmaps section
+        st.markdown("---")
+        create_options_heatmaps(selected_symbol, selected_date)
     
     # Footer
     st.markdown("---")
