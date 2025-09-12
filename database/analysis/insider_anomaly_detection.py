@@ -726,9 +726,16 @@ class InsiderAnomalyDetector:
                         pattern_description += ", Significant OI growth"
                     
                     # Calculate call/put ratio (cap at 9999.9999 to avoid database overflow)
-                    call_put_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
-                    # Ensure the ratio doesn't exceed database precision (DECIMAL(8,4))
-                    call_put_ratio = min(call_put_ratio, 9999.9999)
+                    original_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
+                    call_put_ratio = min(original_ratio, 9999.9999)
+                    if original_ratio > 9999.9999:
+                        logger.warning(f"Capped call/put ratio for {anomaly_data['symbol']}: {original_ratio:.2f} -> 9999.9999")
+                    
+                    # Cap open interest multiplier to avoid database overflow (DECIMAL(8,4))
+                    original_multiplier = details.get('open_interest_multiplier', 0)
+                    open_interest_multiplier = min(original_multiplier, 9999.9999)
+                    if original_multiplier > 9999.9999:
+                        logger.warning(f"Capped open interest multiplier for {anomaly_data['symbol']}: {original_multiplier:.2f} -> 9999.9999")
                     
                     # Prepare row data
                     row_data = (
@@ -753,7 +760,7 @@ class InsiderAnomalyDetector:
                         details.get('otm_call_percentage', 0),
                         details.get('short_term_percentage', 0),
                         call_put_ratio,
-                        details.get('open_interest_multiplier', 0),
+                        open_interest_multiplier,
                         details.get('current_open_interest', 0),
                         details.get('prior_open_interest', 0),
                         datetime.now(self.est_tz)
