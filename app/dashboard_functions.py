@@ -288,12 +288,13 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
                 total_score = safe_numeric(row.get('total_score', 0))
                 open_interest_score = safe_numeric(row.get('open_interest_score', 0))
                 open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
                 
                 key_indicators = f"""• {volume_text}
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/2.0
 • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
-• Z-Score: {z_score:.1f}"""
+• Time Sensitivity: {short_term_percentage:.0f}% short-term"""
                 
                 # Handle timestamp safely
                 timestamp_str = 'N/A'
@@ -307,6 +308,7 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
                     'Symbol': str(row.get('symbol', 'Unknown')),
                     'Score': f"{total_score:.1f}/10",
                     'Volume': f"{total_volume:,}",
+                    'Open Interest': f"{int(safe_numeric(row.get('open_interest', 0))):,}",
                     'Key Indicators': key_indicators,
                     'Insider Pattern': pattern,
                     'Timestamp': timestamp_str
@@ -360,12 +362,13 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
                 total_score = safe_numeric(row.get('total_score', 0))
                 open_interest_score = safe_numeric(row.get('open_interest_score', 0))
                 open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
                 
                 key_indicators = f"""• {volume_text}
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/2.0
 • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
-• Z-Score: {z_score:.1f}"""
+• Time Sensitivity: {short_term_percentage:.0f}% short-term"""
                 
                 # Handle timestamp safely
                 timestamp_str = 'N/A'
@@ -379,6 +382,7 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
                     'Symbol': str(row.get('symbol', 'Unknown')),
                     'Score': f"{total_score:.1f}/10",
                     'Volume': f"{total_volume:,}",
+                    'Open Interest': f"{int(safe_numeric(row.get('open_interest', 0))):,}",
                     'Key Indicators': key_indicators,
                     'Insider Pattern': pattern,
                     'Timestamp': timestamp_str
@@ -489,12 +493,13 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                     total_score = safe_numeric(row.get('total_score', 0))
                     open_interest_score = safe_numeric(row.get('open_interest_score', 0))
                     open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                    short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
                     
                     key_indicators = f"""• {volume_text}
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/2.0
 • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
-• Z-Score: {z_score:.1f}"""
+• Time Sensitivity: {short_term_percentage:.0f}% short-term"""
                     
                     # Handle timestamp safely
                     timestamp_str = 'N/A'
@@ -508,6 +513,7 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                         'Symbol': str(row.get('symbol', 'Unknown')),
                         'Score': f"{total_score:.1f}/10",
                         'Volume': f"{total_volume:,}",
+                        'Open Interest': f"{int(safe_numeric(row.get('open_interest', 0))):,}",
                         'Key Indicators': key_indicators,
                         'Timestamp': timestamp_str
                     })
@@ -560,12 +566,13 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                     total_score = safe_numeric(row.get('total_score', 0))
                     open_interest_score = safe_numeric(row.get('open_interest_score', 0))
                     open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                    short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
                     
                     key_indicators = f"""• {volume_text}
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/2.0
 • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
-• Z-Score: {z_score:.1f}"""
+• Time Sensitivity: {short_term_percentage:.0f}% short-term"""
                     
                     # Handle timestamp safely
                     timestamp_str = 'N/A'
@@ -579,6 +586,7 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                         'Symbol': str(row.get('symbol', 'Unknown')),
                         'Score': f"{total_score:.1f}/10",
                         'Volume': f"{total_volume:,}",
+                        'Open Interest': f"{int(safe_numeric(row.get('open_interest', 0))):,}",
                         'Key Indicators': key_indicators,
                         'Timestamp': timestamp_str
                     })

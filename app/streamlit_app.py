@@ -82,31 +82,26 @@ def main():
     # Unified symbol selection
     st.sidebar.subheader("Symbol Selection")
     
-    # Symbol search
-    search_term = st.sidebar.text_input("Search Symbol", "").upper()
+    # Show anomaly symbols first, then others
+    anomaly_symbols = anomalies_df['symbol'].unique().tolist() if not anomalies_df.empty else []
+    other_symbols = [s for s in available_symbols if s not in anomaly_symbols]
+    all_symbols = ['Overview'] + anomaly_symbols + other_symbols[:50]  # Limit to first 50 others for performance
     
-    if search_term:
-        matching_symbols = [s for s in available_symbols if search_term in s]
-        if matching_symbols:
-            selected_symbol = st.sidebar.selectbox("Select Symbol", matching_symbols)
-        else:
-            st.warning(f"No symbols found matching '{search_term}'")
-            selected_symbol = None
-    else:
-        # Show anomaly symbols first, then others
-        anomaly_symbols = anomalies_df['symbol'].unique().tolist() if not anomalies_df.empty else []
-        other_symbols = [s for s in available_symbols if s not in anomaly_symbols]
-        all_symbols = ['Overview'] + anomaly_symbols + other_symbols[:50]  # Limit to first 50 others for performance
-        
-        # If we have a selected symbol from URL/session, make sure it's in the list
-        if selected_symbol and selected_symbol not in all_symbols:
-            all_symbols = [selected_symbol] + all_symbols
-        
-        selected_symbol = st.sidebar.selectbox(
-            "Select Symbol for Analysis",
-            all_symbols,
-            index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0
-        )
+    # If we have a selected symbol from URL/session, make sure it's in the list
+    if selected_symbol and selected_symbol not in all_symbols:
+        all_symbols = [selected_symbol] + all_symbols
+    
+    selected_symbol = st.sidebar.selectbox(
+        "Select Symbol for Analysis",
+        all_symbols,
+        index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0
+    )
+    
+    # Return to Summary button
+    if selected_symbol and selected_symbol != 'Overview':
+        if st.sidebar.button("Return to Summary"):
+            st.session_state.selected_symbol = 'Overview'
+            st.rerun()
     
     # Date selector for analysis
     selected_date = None
