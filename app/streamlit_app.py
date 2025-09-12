@@ -25,7 +25,7 @@ try:
         get_current_anomalies, get_symbol_history,
         create_anomaly_summary_table, create_anomaly_summary_by_date, create_symbol_analysis,
         get_available_symbols, create_options_heatmaps, create_contracts_table, create_basic_symbol_analysis, get_symbol_anomaly_data,
-        create_performance_matrix
+        create_performance_matrix, get_ordered_anomaly_symbols
     )
     DATABASE_AVAILABLE = True
 except Exception as e:
@@ -88,10 +88,11 @@ def main():
     # Unified symbol selection
     st.sidebar.subheader("Symbol Selection")
     
-    # Show anomaly symbols first, then others
-    anomaly_symbols = anomalies_df['symbol'].unique().tolist() if not anomalies_df.empty else []
-    other_symbols = [s for s in available_symbols if s not in anomaly_symbols]
-    all_symbols = ['Overview'] + anomaly_symbols + other_symbols  # Show all available symbols
+    # Show anomaly symbols first, ordered by date descending, high volume first, low volume next, score descending
+    # Then all other symbols alphabetically
+    ordered_anomaly_symbols = get_ordered_anomaly_symbols(anomalies_df)
+    other_symbols = sorted([s for s in available_symbols if s not in ordered_anomaly_symbols])
+    all_symbols = ['Overview'] + ordered_anomaly_symbols + other_symbols
     
     # If we have a selected symbol from URL/session, make sure it's in the list
     if selected_symbol and selected_symbol not in all_symbols:
@@ -102,6 +103,10 @@ def main():
         all_symbols,
         index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0
     )
+    
+    # Update session state when symbol changes
+    if selected_symbol != st.session_state.get('selected_symbol'):
+        st.session_state.selected_symbol = selected_symbol
     
     # Date selector for analysis
     selected_date = None
@@ -115,6 +120,8 @@ def main():
     # Buttons
     if selected_symbol and selected_symbol != 'Overview':
         if st.sidebar.button("Return to Summary"):
+            # Clear any URL parameters and set Overview
+            st.query_params.clear()
             st.session_state.selected_symbol = 'Overview'
             st.rerun()
     

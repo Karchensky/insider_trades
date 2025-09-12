@@ -19,6 +19,52 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database.core.connection import db
 
+def get_ordered_anomaly_symbols(anomalies_df: pd.DataFrame) -> List[str]:
+    """Get anomaly symbols ordered by date descending, high volume first, low volume next, score descending."""
+    if anomalies_df.empty:
+        return []
+    
+    # Helper function for safe numeric conversion
+    def safe_numeric(value, default=0, as_int=False):
+        if value is None or value == '' or str(value).lower() in ['none', 'null']:
+            return default
+        try:
+            if as_int:
+                return int(float(value))
+            else:
+                return float(value)
+        except (ValueError, TypeError):
+            return default
+    
+    # Create a list of tuples for sorting: (date, volume_type, score, symbol)
+    symbol_data = []
+    for _, row in anomalies_df.iterrows():
+        try:
+            # Extract date
+            date_key = None
+            if pd.notna(row.get('event_date')):
+                date_key = pd.to_datetime(row['event_date']).date()
+            elif pd.notna(row.get('as_of_timestamp')):
+                date_key = pd.to_datetime(row['as_of_timestamp']).date()
+            
+            if date_key:
+                total_volume = safe_numeric(row.get('total_volume', 0), as_int=True)
+                total_score = safe_numeric(row.get('total_score', 0))
+                symbol = str(row.get('symbol', ''))
+                
+                # Volume type: 0 for high volume (>=500), 1 for low volume (<500)
+                volume_type = 0 if total_volume >= 500 else 1
+                
+                symbol_data.append((date_key, volume_type, -total_score, symbol))  # Negative score for descending order
+        except Exception as e:
+            continue
+    
+    # Sort by: date descending, volume type (high first), score descending
+    symbol_data.sort(key=lambda x: (-x[0].toordinal(), x[1], x[2]))
+    
+    # Extract symbols in order
+    return [item[3] for item in symbol_data]
+
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_current_anomalies() -> pd.DataFrame:
     """Get current high-conviction anomalies from daily_anomaly_snapshot table."""
@@ -243,9 +289,13 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
     
     st.subheader("High-Conviction Insider Trading Alerts")
     
-    # Separate high and low volume anomalies
+    # Separate high and low volume anomalies, then sort by score descending
     high_volume_df = anomalies_df[anomalies_df['total_volume'] >= 500].copy()
     low_volume_df = anomalies_df[anomalies_df['total_volume'] < 500].copy()
+    
+    # Sort each group by score descending
+    high_volume_df = high_volume_df.sort_values('total_score', ascending=False)
+    low_volume_df = low_volume_df.sort_values('total_score', ascending=False)
     
     # Helper function for safe numeric conversion
     def safe_numeric(value, default=0, as_int=False):
@@ -460,9 +510,13 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
         # Create subheader for the date
         st.subheader(f"Anomalies for {date.strftime('%Y-%m-%d')}")
         
-        # Separate high and low volume anomalies
+        # Separate high and low volume anomalies, then sort by score descending
         high_volume_anomalies = [row for row in date_anomalies if safe_numeric(row.get('total_volume', 0), as_int=True) >= 500]
         low_volume_anomalies = [row for row in date_anomalies if safe_numeric(row.get('total_volume', 0), as_int=True) < 500]
+        
+        # Sort each group by score descending
+        high_volume_anomalies.sort(key=lambda x: safe_numeric(x.get('total_score', 0)), reverse=True)
+        low_volume_anomalies.sort(key=lambda x: safe_numeric(x.get('total_score', 0)), reverse=True)
         
         # Process high volume anomalies
         if high_volume_anomalies:
