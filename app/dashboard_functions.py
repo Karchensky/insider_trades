@@ -176,8 +176,8 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
                 COUNT(*) as contract_count,
                 AVG(dos.implied_volatility) as avg_iv
             FROM daily_option_snapshot dos
-            INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
-            WHERE dos.symbol = %s
+            INNER JOIN option_contracts oc dos.contract_ticker = oc.contract_ticker
+            WHERE oc.symbol = %s
               AND dos.date >= CURRENT_DATE - INTERVAL %s
             GROUP BY dos.date, oc.contract_type
             ORDER BY dos.date ASC, oc.contract_type )
@@ -219,7 +219,7 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
                 COALESCE(s.day_close, s.day_vwap) as underlying_price,
                 o.as_of_timestamp
             FROM temp_option o
-            INNER JOIN option_contracts oc ON o.symbol = oc.symbol AND o.contract_ticker = oc.contract_ticker
+            INNER JOIN option_contracts oc ON o.contract_ticker = oc.contract_ticker
             LEFT JOIN temp_stock s ON o.symbol = s.symbol
             WHERE o.symbol = %s
               AND o.session_volume > 0
@@ -1261,7 +1261,7 @@ def get_options_heatmap_data(symbol: str, target_date: date = None) -> pd.DataFr
                 dos.implied_volatility,
                 s.close as underlying_price
             FROM daily_option_snapshot dos
-            INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
+            INNER JOIN option_contracts oc ON dos.contract_ticker = oc.contract_ticker
             LEFT JOIN daily_stock_snapshot s ON dos.symbol = s.symbol AND dos.date = s.date
             WHERE dos.symbol = %s
               AND dos.date = %s
@@ -1300,7 +1300,7 @@ def get_options_heatmap_data(symbol: str, target_date: date = None) -> pd.DataFr
                     o.implied_volatility,
                     COALESCE(s.day_close, s.day_vwap) as underlying_price
                 FROM latest_temp_option o
-                INNER JOIN option_contracts oc ON o.symbol = oc.symbol AND o.contract_ticker = oc.contract_ticker
+                INNER JOIN option_contracts oc ON o.contract_ticker = oc.contract_ticker
                 LEFT JOIN latest_temp_stock s ON o.symbol = s.symbol
                 ORDER BY oc.expiration_date, oc.strike_price
             """
@@ -1327,7 +1327,7 @@ def get_available_symbols() -> List[str]:
         # Get symbols from multiple tables
         query = """
             SELECT DISTINCT symbol FROM (
-                SELECT symbol FROM daily_option_snapshot
+                SELECT symbol FROM daily_stock_snapshot
             ) symbols
             ORDER BY symbol
         """
@@ -1445,9 +1445,9 @@ def get_contract_details(symbol: str, target_date: date = None) -> pd.DataFrame:
                 s.close as underlying_price,
                 dos.date
             FROM daily_option_snapshot dos
-            INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
+            INNER JOIN option_contracts oc ON dos.contract_ticker = oc.contract_ticker
             LEFT JOIN daily_stock_snapshot s ON dos.symbol = s.symbol AND dos.date = s.date
-            WHERE dos.symbol = %s
+            WHERE oc.symbol = %s
               AND dos.date = %s
               AND dos.volume > 0
             ORDER BY dos.volume DESC
@@ -1488,7 +1488,7 @@ def get_contract_details(symbol: str, target_date: date = None) -> pd.DataFrame:
                     COALESCE(s.day_close, s.day_vwap) as underlying_price,
                     date(o.as_of_timestamp) as date
                 FROM latest_temp_option o
-                INNER JOIN option_contracts oc ON o.symbol = oc.symbol AND o.contract_ticker = oc.contract_ticker
+                INNER JOIN option_contracts oc ON o.contract_ticker = oc.contract_ticker
                 LEFT JOIN latest_temp_stock s ON o.symbol = s.symbol
                 ORDER BY o.session_volume DESC
             """
@@ -1558,8 +1558,8 @@ def get_consolidated_symbol_data(symbol: str, target_date: date = None) -> Dict[
                     COUNT(*) as contract_count,
                     AVG(dos.implied_volatility) as avg_iv
                 FROM daily_option_snapshot dos
-                INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
-                WHERE dos.symbol = %s AND dos.date >= CURRENT_DATE - INTERVAL '30 days'
+                INNER JOIN option_contracts oc ON dos.contract_ticker = oc.contract_ticker
+                WHERE oc.symbol = %s AND dos.date >= CURRENT_DATE - INTERVAL '30 days'
                 GROUP BY dos.date, oc.contract_type
                 ORDER BY dos.date ASC, oc.contract_type
             ),
@@ -1574,9 +1574,9 @@ def get_consolidated_symbol_data(symbol: str, target_date: date = None) -> Dict[
                     dos.implied_volatility,
                     s.close as underlying_price
                 FROM daily_option_snapshot dos
-                INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
-                LEFT JOIN daily_stock_snapshot s ON dos.symbol = s.symbol AND dos.date = s.date
-                WHERE dos.symbol = %s AND dos.date = %s AND dos.volume > 0
+                INNER JOIN option_contracts oc ON dos.contract_ticker = oc.contract_ticker
+                LEFT JOIN daily_stock_snapshot s ON oc.symbol = s.symbol AND dos.date = s.date
+                WHERE oc.symbol = %s AND dos.date = %s AND dos.volume > 0
                 
                 UNION ALL
                 
@@ -1590,7 +1590,7 @@ def get_consolidated_symbol_data(symbol: str, target_date: date = None) -> Dict[
                     o.implied_volatility,
                     COALESCE(s.day_close, s.day_vwap) as underlying_price
                 FROM latest_temp_option o
-                INNER JOIN option_contracts oc ON o.symbol = oc.symbol AND o.contract_ticker = oc.contract_ticker
+                INNER JOIN option_contracts oc ON o.contract_ticker = oc.contract_ticker
                 LEFT JOIN latest_temp_stock s ON o.symbol = s.symbol
                 WHERE o.symbol = %s AND %s = CURRENT_DATE
             ),
@@ -1608,9 +1608,9 @@ def get_consolidated_symbol_data(symbol: str, target_date: date = None) -> Dict[
                     s.close as underlying_price,
                     dos.date
                 FROM daily_option_snapshot dos
-                INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
-                LEFT JOIN daily_stock_snapshot s ON dos.symbol = s.symbol AND dos.date = s.date
-                WHERE dos.symbol = %s AND dos.date = %s AND dos.volume > 0
+                INNER JOIN option_contracts oc ON dos.contract_ticker = oc.contract_ticker
+                LEFT JOIN daily_stock_snapshot s ON oc.symbol = s.symbol AND dos.date = s.date
+                WHERE oc.symbol = %s AND dos.date = %s AND dos.volume > 0
                 
                 UNION ALL
                 
@@ -1627,7 +1627,7 @@ def get_consolidated_symbol_data(symbol: str, target_date: date = None) -> Dict[
                     COALESCE(s.day_close, s.day_vwap) as underlying_price,
                     date(o.as_of_timestamp) as date
                 FROM latest_temp_option o
-                INNER JOIN option_contracts oc ON o.symbol = oc.symbol AND o.contract_ticker = oc.contract_ticker
+                INNER JOIN option_contracts oc ON o.contract_ticker = oc.contract_ticker
                 LEFT JOIN latest_temp_stock s ON o.symbol = s.symbol
                 WHERE o.symbol = %s AND %s = CURRENT_DATE
             )

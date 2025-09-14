@@ -883,9 +883,146 @@ class BulkStockDataLoader:
             logger.error(f"Option snapshots batch bulk insert failed with {method} method: {e}")
             raise
     
+    def _get_symbol_for_contracts(self, contract_tickers: List[str]) -> Dict[str, str]:
+        """
+        Get symbols for contract tickers using existing option_contracts table first,
+        then API fallback for new contracts.
+        
+        Args:
+            contract_tickers: List of contract tickers to get symbols for
+            
+        Returns:
+            Dict mapping contract_ticker -> symbol
+        """
+        symbol_map = {}
+        missing_contracts = []
+        
+        # Step 1: Check existing option_contracts table
+        conn = db.connect()
+        try:
+            with conn.cursor() as cur:
+                # Get symbols for contracts we already know about
+                placeholders = ','.join(['%s'] * len(contract_tickers))
+                cur.execute(f"""
+                    SELECT DISTINCT contract_ticker, symbol 
+                    FROM option_contracts 
+                    WHERE contract_ticker IN ({placeholders}) 
+                    AND symbol IS NOT NULL
+                """, contract_tickers)
+                
+                for row in cur.fetchall():
+                    symbol_map[row[0]] = row[1]
+                
+                # Find contracts we don't have symbols for
+                missing_contracts = [ct for ct in contract_tickers if ct not in symbol_map]
+                
+                logger.info(f"Found {len(symbol_map)} existing symbols, {len(missing_contracts)} new contracts need API lookup")
+                
+        finally:
+            conn.close()
+        
+        # Step 2: API fallback for new contracts
+        if missing_contracts:
+            logger.info(f"Fetching symbols for {len(missing_contracts)} new contracts via API...")
+            api_symbols = self._fetch_symbols_from_api(missing_contracts)
+            symbol_map.update(api_symbols)
+        
+        # Step 3: Regex fallback for contracts not found in option_contracts or API
+        still_missing = [ct for ct in contract_tickers if ct not in symbol_map]
+        if still_missing:
+            logger.info(f"Using regex fallback for {len(still_missing)} contracts not found in option_contracts or API")
+            regex_symbols = self._extract_symbols_with_regex(still_missing)
+            symbol_map.update(regex_symbols)
+        
+        return symbol_map
+
+    def _extract_symbols_with_regex(self, contract_tickers: List[str]) -> Dict[str, str]:
+        """
+        Extract symbols from contract tickers using regex as final fallback.
+        This handles contracts not found in option_contracts or API.
+        """
+        symbol_map = {}
+        
+        for contract_ticker in contract_tickers:
+            try:
+                symbol = ''
+                if contract_ticker and ':' in contract_ticker:
+                    parts = contract_ticker.split(':')
+                    if len(parts) > 1:
+                        option_part = parts[1]
+                        import re
+                        m = re.match(r'^([A-Z]+)', option_part)
+                        if m:
+                            symbol = m.group(1)
+                
+                if symbol:
+                    symbol_map[contract_ticker] = symbol
+                    logger.debug(f"Regex extracted symbol '{symbol}' for contract {contract_ticker}")
+                else:
+                    logger.warning(f"Could not extract symbol from contract {contract_ticker}")
+                    
+            except Exception as e:
+                logger.error(f"Regex extraction failed for {contract_ticker}: {e}")
+        
+        logger.info(f"Regex fallback extracted {len(symbol_map)} symbols from {len(contract_tickers)} contracts")
+        return symbol_map
+
+    def _fetch_symbols_from_api(self, contract_tickers: List[str]) -> Dict[str, str]:
+        """
+        Fetch symbols for contract tickers using Polygon contract overview endpoint.
+        
+        Args:
+            contract_tickers: List of contract tickers to get symbols for
+            
+        Returns:
+            Dict mapping contract_ticker -> symbol
+        """
+        import requests
+        import os
+        from time import sleep
+        
+        api_key = os.getenv('POLYGON_API_KEY')
+        if not api_key:
+            logger.error("POLYGON_API_KEY not found in environment")
+            return {}
+        
+        symbol_map = {}
+        base_url = "https://api.polygon.io/v3/reference/options/contracts"
+        
+        for i, contract_ticker in enumerate(contract_tickers):
+            try:
+                # Rate limiting: 5 calls per second max
+                if i > 0 and i % 5 == 0:
+                    sleep(1)
+                
+                url = f"{base_url}/{contract_ticker}"
+                params = {'apikey': api_key}
+                
+                response = requests.get(url, params=params, timeout=10)
+                response.raise_for_status()
+                
+                data = response.json()
+                if data.get('status') == 'OK' and 'results' in data:
+                    underlying_ticker = data['results'].get('underlying_ticker', '')
+                    if underlying_ticker:
+                        symbol_map[contract_ticker] = underlying_ticker
+                        logger.debug(f"API: {contract_ticker} -> {underlying_ticker}")
+                    else:
+                        logger.warning(f"No underlying_ticker found for {contract_ticker}")
+                else:
+                    logger.warning(f"API error for {contract_ticker}: {data.get('status', 'Unknown')}")
+                    
+            except Exception as e:
+                logger.error(f"Error fetching symbol for {contract_ticker}: {e}")
+                continue
+        
+        logger.info(f"Successfully fetched {len(symbol_map)} symbols from API")
+        return symbol_map
+
     def bulk_upsert_option_snapshots_copy(self, snapshots: List[Dict[str, Any]]) -> bool:
         """
         Ultra-fast bulk upsert for option snapshots using PostgreSQL COPY.
+        Now uses proper symbol lookup via option_contracts table and API fallback.
         """
         start_time = time.time()
         record_count = len(snapshots)
@@ -896,29 +1033,38 @@ class BulkStockDataLoader:
         
         logger.info(f"Starting bulk COPY upsert for {record_count:,} option snapshots...")
         
-        # Prepare data for COPY
+        # Step 1: Extract contract tickers and get symbols
+        contract_tickers = []
+        snapshot_data = []
+        
+        for snapshot in snapshots:
+            try:
+                contract_ticker = snapshot.get('symbol', '')
+                if contract_ticker:
+                    contract_tickers.append(contract_ticker)
+                    snapshot_data.append(snapshot)
+            except Exception as e:
+                logger.debug(f"Skipping invalid snapshot: {e}")
+                continue
+        
+        # Step 2: Get symbols for all contracts
+        symbol_map = self._get_symbol_for_contracts(contract_tickers)
+        
+        # Step 3: Prepare data for COPY
         csv_buffer = StringIO()
         valid_records = 0
         
-        for snapshot in snapshots:
+        for snapshot in snapshot_data:
             try:
                 # Extract data from Polygon Daily Ticker Summary response
                 date_val = snapshot.get('from', '')
                 contract_ticker = snapshot.get('symbol', '')
                 
-                # Extract underlying symbol from contract ticker (e.g., O:AAPL211119C00085000 -> AAPL)
-                symbol = ''
-                if contract_ticker and ':' in contract_ticker:
-                    # Extract symbol from option ticker format
-                    parts = contract_ticker.split(':')
-                    if len(parts) > 1:
-                        # Remove date and option type info to get just the symbol
-                        option_part = parts[1]
-                        # Extract symbol (everything before numbers/letters indicating date/strike)
-                        import re
-                        symbol_match = re.match(r'^([A-Z]+)', option_part)
-                        if symbol_match:
-                            symbol = symbol_match.group(1)
+                # Get symbol from our lookup (existing or API-fetched)
+                symbol = symbol_map.get(contract_ticker, '')
+                if not symbol:
+                    logger.warning(f"No symbol found for contract {contract_ticker}, skipping")
+                    continue
                 
                 open_price = float(snapshot.get('open', 0)) if snapshot.get('open') is not None else None
                 high_price = float(snapshot.get('high', 0)) if snapshot.get('high') is not None else None
@@ -1057,16 +1203,48 @@ class BulkStockDataLoader:
                 # Date for the record
                 date_val = default_date or to_date_from_window_start(r.get('window_start')) or ''
 
-                # Derive underlying symbol from contract ticker (same logic as API path)
+                # Use 3-step symbol resolution: option_contracts -> API -> regex fallback
                 symbol = ''
-                if contract_ticker and ':' in contract_ticker:
-                    parts = contract_ticker.split(':')
-                    if len(parts) > 1:
-                        option_part = parts[1]
-                        import re
-                        m = re.match(r'^([A-Z]+)', option_part)
-                        if m:
-                            symbol = m.group(1)
+                if contract_ticker:
+                    # Step 1: Check option_contracts table
+                    conn = db.connect()
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                SELECT symbol FROM option_contracts 
+                                WHERE contract_ticker = %s AND symbol IS NOT NULL
+                                LIMIT 1
+                            """, (contract_ticker,))
+                            result = cur.fetchone()
+                            if result:
+                                symbol = result[0]
+                    finally:
+                        conn.close()
+                    
+                    # Step 2: API fallback if not found in option_contracts
+                    if not symbol:
+                        try:
+                            import requests
+                            import os
+                            api_key = os.getenv('POLYGON_API_KEY')
+                            url = f"https://api.polygon.io/v3/reference/options/contracts/{contract_ticker}"
+                            response = requests.get(url, params={'apikey': api_key}, timeout=5)
+                            if response.status_code == 200:
+                                data = response.json()
+                                if data.get('status') == 'OK' and 'results' in data:
+                                    symbol = data['results'].get('underlying_ticker', '')
+                        except Exception:
+                            pass
+                    
+                    # Step 3: Regex fallback if still not found
+                    if not symbol and ':' in contract_ticker:
+                        parts = contract_ticker.split(':')
+                        if len(parts) > 1:
+                            option_part = parts[1]
+                            import re
+                            m = re.match(r'^([A-Z]+)', option_part)
+                            if m:
+                                symbol = m.group(1)
 
                 def f_num(val: Any) -> Optional[float]:
                     if val in (None, "", "\\N"):
@@ -1274,13 +1452,12 @@ class BulkStockDataLoader:
             'records_per_second': 0
         }
 
-    def update_daily_option_snapshot_analytics_from_temp(self, target_date: str) -> Dict[str, Any]:
+    def update_daily_option_snapshot_greeks_and_iv_from_temp(self, target_date: str) -> Dict[str, Any]:
         """
-        For a given date, update the analytics columns in daily_option_snapshot
-        with the latest data from temp_option.
+        For a given date, update the Greeks and implied volatility columns in daily_option_snapshot
+        with the latest data from temp_option (prior day's data).
         
-        Directly update the implied_volatility, open_interest, and Greeks columns
-        in the daily_option_snapshot table.
+        This updates: implied_volatility, greeks_delta, greeks_gamma, greeks_theta, greeks_vega
         """
         start = time.time()
         conn = db.connect()
@@ -1290,7 +1467,6 @@ class BulkStockDataLoader:
                 UPDATE daily_option_snapshot dos
                 SET 
                     implied_volatility = temp.implied_volatility,
-                    open_interest = temp.open_interest,
                     greeks_delta = temp.greeks_delta,
                     greeks_gamma = temp.greeks_gamma,
                     greeks_theta = temp.greeks_theta,
@@ -1301,7 +1477,6 @@ class BulkStockDataLoader:
                         symbol,
                         contract_ticker,
                         implied_volatility,
-                        open_interest,
                         greeks_delta,
                         greeks_gamma,
                         greeks_theta,
@@ -1311,7 +1486,6 @@ class BulkStockDataLoader:
                     ORDER BY symbol, contract_ticker, as_of_timestamp DESC
                 ) temp
                 WHERE dos.date = %s
-                  AND dos.symbol = temp.symbol
                   AND dos.contract_ticker = temp.contract_ticker;
                 """,
                 (target_date, target_date)
@@ -1324,6 +1498,45 @@ class BulkStockDataLoader:
             'execution_time': time.time() - start
         }
 
+    def update_daily_option_snapshot_open_interest_from_temp(self, target_date: str) -> Dict[str, Any]:
+        """
+        For a given date, update ONLY the open_interest column in daily_option_snapshot
+        with the latest data from temp_option (fresh data from current day).
+        
+        This updates: open_interest only
+        
+        Note: Uses CURRENT_DATE for temp_option lookup because fresh data is collected
+        on the current day but contains open_interest for the target_date.
+        """
+        start = time.time()
+        conn = db.connect()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE daily_option_snapshot dos
+                SET 
+                    open_interest = temp.open_interest,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM (
+                    SELECT DISTINCT ON (contract_ticker)
+                        contract_ticker,
+                        open_interest
+                    FROM temp_option
+                    WHERE DATE(as_of_timestamp) = CURRENT_DATE
+                    ORDER BY  contract_ticker, as_of_timestamp DESC
+                ) temp
+                WHERE dos.date = %s
+                  AND dos.contract_ticker = temp.contract_ticker;
+                """,
+                (target_date,)
+            )
+            affected = cursor.rowcount or 0
+            conn.commit()
+        return {
+            'success': True,
+            'records_updated': affected,
+            'execution_time': time.time() - start
+        }
 
 class DatabaseOptimizer:
     """

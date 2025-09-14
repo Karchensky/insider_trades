@@ -207,7 +207,7 @@ class InsiderAnomalyDetector:
                             SUM(CASE WHEN oc.contract_type = 'put' AND oc.strike_price < dss.close * 0.95 THEN dos.volume ELSE 0 END) as otm_put_volume,
                             COUNT(CASE WHEN oc.contract_type = 'put' AND oc.strike_price < dss.close * 0.95 THEN 1 END) as otm_put_contracts
                         FROM daily_option_snapshot dos
-                        INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
+                        INNER JOIN option_contracts oc ON dos.contract_ticker = oc.contract_ticker
                         LEFT JOIN daily_stock_snapshot dss ON dos.symbol = dss.symbol AND dos.date = dss.date
                         WHERE dos.date BETWEEN %s AND %s
                           AND dos.volume > 0

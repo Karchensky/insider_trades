@@ -32,4 +32,4 @@ jobs:
 
       - name: Run daily process
         run: |
-          python daily_schedule.py --recent 3 --retention 30 | cat
+          python daily_schedule.py --recent 3 --retention 30 --no-expired-contracts | cat
