@@ -101,12 +101,9 @@ def main():
     selected_symbol = st.sidebar.selectbox(
         "Select Symbol for Analysis",
         all_symbols,
-        index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0
+        index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0,
+        key="selected_symbol"
     )
-    
-    # Update session state when symbol changes
-    if selected_symbol != st.session_state.get('selected_symbol'):
-        st.session_state.selected_symbol = selected_symbol
     
     # Date selector for analysis
     selected_date = None
