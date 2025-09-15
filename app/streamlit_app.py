@@ -88,7 +88,7 @@ def main():
     # Unified symbol selection
     st.sidebar.subheader("Symbol Selection")
     
-    # Show anomaly symbols first, ordered by date descending, high volume first, low volume next, score descending
+    # Show anomaly symbols first, ordered by date descending, score descending
     # Then all other symbols alphabetically
     ordered_anomaly_symbols = get_ordered_anomaly_symbols(anomalies_df)
     other_symbols = sorted([s for s in available_symbols if s not in ordered_anomaly_symbols])
@@ -178,7 +178,7 @@ def main():
     st.markdown("---")
     st.markdown("""
     **System Status**: Active monitoring every 15 minutes during market hours  
-    **Alert Threshold**: Score ≥ 7.0/10.0 (high-conviction only)  
+    **Alert Threshold**: Score ≥ 7.5/10.0 (high-conviction only)  
     **Detection Method**: Statistical Z-score analysis vs 30-day baseline  
     
     *This system is for informational purposes only. Always conduct proper due diligence.*

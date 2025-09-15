@@ -1,41 +1,43 @@
 # Insider Trading Detection System
 
-Scrapes polygon API to try & find insder trading patterns
+Scrapes polygon API to try & find insder trading patterns. It's probably easier to find the cheaters than it is to find legit winners.
+
+High level summary: scrape options & stock data from polygon to establish baseline expectations for activity on a given symbol over a period of time --> check periodically throughout the current day to see if the current day's options trading activity is anomlous relative to this baseline. If anomolous activity is detected --> send email notification highlighting what stands out.
 
 ## Project Structure
 
 ```text
 insider_trades/
 ├── app/                           # Streamlit dashboard application
-│   ├── streamlit_app.py          # Main dashboard interface
-│   ├── dashboard_functions.py    # Dashboard utility functions
-│   └── requirements.txt          # Dashboard dependencies
+│   ├── streamlit_app.py            # Main dashboard interface
+│   ├── dashboard_functions.py      # Dashboard utility functions
+│   └── requirements.txt            # Dashboard dependencies
 ├── database/                      # All database-related functionality
-│   ├── core/                     # Database connections, bulk operations
-│   │   ├── connection.py         # PostgreSQL connection management
-│   │   ├── bulk_operations.py    # Bulk data loading operations
-│   │   └── stock_data.py         # Stock data management utilities
-│   ├── analysis/                 # Anomaly detection algorithms
-│   │   └── insider_anomaly_detection.py  # High-conviction insider trading detection
-│   └── maintenance/              # Data retention and cleanup
-│       └── data_retention.py     # Automated data lifecycle management
-├── scrapers/                     # Data collection from external APIs
+│   ├── core/                       # Database connections, bulk operations
+│   │   ├── connection.py           # PostgreSQL connection management
+│   │   ├── bulk_operations.py      # Bulk data loading operations
+│   │   └── stock_data.py           # Stock data management utilities
+│   ├── analysis/                   # Anomaly detection algorithms
+│   │   └── insider_anomaly_detection.py  # Insider trading scoring algorithm
+│   └── maintenance/                # Data retention and cleanup
+│       └── data_retention.py       # Automated data lifecycle management
+├── scrapers/                      # Data collection from external APIs
 │   ├── polygon_full_market_snapshot_scraper.py      # Real-time stock data
 │   ├── polygon_unified_options_snapshot_scraper.py  # Real-time options data
 │   ├── polygon_daily_scraper.py                     # Historical stock data
 │   ├── polygon_option_flatfile_loader.py            # Historical options data
 │   └── polygon_option_contracts_scraper.py          # Options contract metadata
 ├── migrations/                   # Database schema migrations
-│   ├── migration_manager.py      # Migration orchestration
-│   └── [YYYYMMDD_######_name.py] # Individual migration files
+│   ├── migration_manager.py       # Migration orchestration
+│   └── [YYYYMMDD_######_name.py]  # Individual migration files
 ├── scripts/                      # Utility and testing scripts
 ├── .github/                      # GitHub Actions for automated scheduling
 │   └── workflows/
-│       ├── daily.yml             # Daily process automation
-│       └── intraday.yml          # Intraday process automation
+│       ├── daily.yml              # Daily process automation
+│       └── intraday.yml           # Intraday process automation
 ├── daily_schedule.py             # Daily data processing orchestrator
 ├── intraday_schedule.py          # Intraday data processing orchestrator
-└── README.md                     # This comprehensive documentation
+└── README.md                     # Documentation
 ```
 
 ## System Overview
@@ -57,7 +59,7 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
 - **Stock Market Data**: Real-time and historical stock prices, volume, VWAP
 - **Options Data**: Real-time and historical options prices, volume, implied volatility, Greeks (delta, gamma, theta, vega)
 - **Options Contracts**: Contract specifications including type, strike price, expiration date, exercise style
-- **API Rate Limits**: 20 requests/second
+- **API Rate Limits**: 20 requests/second (paid tier)
 
 ### Database: PostgreSQL (Supabase)
 
@@ -65,12 +67,11 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
 - **Anomaly Storage**: `daily_anomaly_snapshot` (persistent anomaly records, stored with 30-day retention)
 - **Historical Tables**: `daily_stock_snapshot`, `daily_option_snapshot` (baseline data, stored with 30-day retention)
 - **Metadata Tables**: `option_contracts` (contract specifications, all active contracts)
-- **Security**: Row Level Security (RLS) enabled with proper access controls
 
 ## Intraday Process Details
 
-**Schedule**: Every 15 minutes during market hours (9:30 AM - 4:00 PM EST) via GitHub Actions
-**Purpose**: Real-time insider trading detection
+**Schedule**: Every 15 minutes during market hours (9:30 AM - 4:00 PM EST) via GitHub Actions.
+**Purpose**: Real-time insider trading detection. API is on a 15 minute delay.
 
 ### Intraday Step-by-Step Process
 
@@ -90,7 +91,7 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
    - Analyzes current activity against 30-day baseline from `daily_option_snapshot`
    - Uses statistical Z-score analysis to identify genuine anomalies
    - Focuses on insider trading patterns: OTM calls, volume spikes, directional bias
-   - Flags only high-conviction cases (score >= 7.0/10.0)
+   - Flags high-conviction cases (score >= 7.5/10.0)
    - Stores results in `daily_anomaly_snapshot` table
 4. **Email Notifications**
 
@@ -103,47 +104,68 @@ Historical data archival, contract metadata management, and cleanup at 8:00 AM E
 #### Intraday Usage
 
 ```bash
-python intraday_schedule.py --retention 1 --options-limit 50000
+python intraday_schedule.py --retention 1
 ```
 
 ## Daily Process Details
 
-**Schedule**: Daily at 8:00 AM EST (morning after business days) via GitHub Actions
+**Schedule**: Daily at 9:00 AM EST (morning after business days) via GitHub Actions
 **Purpose**: Historical data archival, contract metadata management, and cleanup
 
 ### Daily Step-by-Step Process
 
 1. **Stock Data Archival**
 
-   - Processes previous trading day's stock data
-   - Archives from `temp_stock` to `daily_stock_snapshot` table
-   - Captures end-of-day prices and volume for baseline calculations
+   - Processes recent trading days' stock data (default: 3 days)
+   - Archives from Polygon.io daily API to `daily_stock_snapshot` table
+   - Captures OHLC prices and volume for baseline calculations
+   - Skips non-trading days automatically
 2. **Options Data Archival**
 
-   - Processes previous trading day's options data
-   - Archives from `temp_option` to `daily_option_snapshot` table
-   - Preserves implied volatility, Greeks, and volume data for anomaly baselines
+   - Processes recent trading days' options data via Polygon.io flat files
+   - Archives to `daily_option_snapshot` table with 3-step symbol resolution
+   - Symbol resolution: 1) Check `option_contracts`, 2) API fallback, 3) Regex fallback
+   - Preserves volume, close prices, and basic contract data for anomaly baselines
 3. **Options Contract Metadata Management**
 
-   - Incremental update of `option_contracts` table to capture all active options contractts
-   - Compares `daily_option_snapshot` contracts with existing `option_contracts`
-   - Only fetches metadata for genuinely new contracts (efficiency optimization)
-   - Captures: contract_type (call/put), strike_price, expiration_date, exercise_style
-4. **Temp Table Cleanup**
+   - Incremental update of `option_contracts` table using `scrape_incremental_smart`
+   - Only processes symbols with contracts missing from `option_contracts` (efficiency optimization)
+   - Fetches both active and expired contracts (configurable via `--no-expired-contracts`)
+   - Captures: contract_type (call/put), strike_price, expiration_date, exercise_style, underlying_ticker
+   - Handles duplicate API responses by keeping first occurrence
+4. **Symbol Mismatch Detection and Correction**
 
-   - Truncates `temp_stock` and `temp_option` tables (intraday data no longer needed)
-   - Preserves `daily_anomaly_snapshot` for historical analysis
-5. **Bulk Data Retention**
+   - Automatically detects symbol mismatches between `daily_option_snapshot` and `option_contracts`
+   - Updates `daily_option_snapshot.symbol` to match `option_contracts.symbol` for data consistency
+   - Ensures all dashboard queries and analysis use consistent symbol references
+5. **Options Data Enhancement (Multi-Step)**
 
-   - Removes `daily_stock_snapshot` and `daily_option_snapshot` data older than 30 days (configurable)
+   - **Step 5a**: Updates Greeks and Implied Volatility from prior day's `temp_option` data
+   - **Step 5b**: Runs fresh intraday scrape using super-batch approach (250 contracts per call, 100 calls per batch, 20 workers)
+   - **Step 5c**: Updates only the `open_interest` field in `daily_option_snapshot` using current day data
+   - Ensures open interest data reflects the correct trading day (not prior day)
+6. **Temp Table Cleanup**
+
+   - Truncates `temp_stock` and `temp_option` tables after daily snapshot capture
+   - Preserves `daily_anomaly_snapshot` for ongoing anomaly analysis
+7. **Bulk Data Retention**
+
+   - Removes `daily_stock_snapshot` and `daily_option_snapshot` data older than retention period (default: 30 days)
    - Removes `option_contracts` where expiration_date < (current_date - retention_days)
-   - Removes `daily_anomaly_snapshot` records older than retention period
-   - Uses bulk operations for efficiency
+   - Removes `daily_anomaly_snapshot` records older than anomaly retention period (default: 30 days)
+   - Uses bulk deletion operations for efficiency
 
 #### Daily Usage
 
 ```bash
-python daily_schedule.py --recent 3 --retention 30 --ticker-limit 1000
+# Standard daily run (processes 3 recent trading days, 30-day retention)
+python daily_schedule.py --recent 3 --retention 30
+
+# With additional options
+python daily_schedule.py --recent 3 --retention 30 --ticker-limit 1000 --no-expired-contracts --dry-run-retention
+
+# Force re-scrape even if data exists
+python daily_schedule.py --recent 3 --retention 30 --force
 ```
 
 ## Anomaly Detection System
@@ -179,38 +201,47 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 - Put Score: `(otm_put_ratio * 1.0) + (short_term_put_ratio * 1.0)`
 - Final Score: Use score from direction with most volume (calls vs puts) (max 2.0 points)
 
-**Example**: ARES with heavy short-term OTM call focus = 2.0/2.0 points
-
 #### 3. Directional Bias Score (0-1 points)
 
-**Purpose**: Detect strong call/put preference indicating insider conviction
+**Purpose**: Detect strong call/put preference indicating insider conviction using both volume and magnitude
 
 **Calculation Method**:
 
-- Call Ratio: `call_volume / (call_volume + put_volume)`
-- Distance from 50/50: `abs(call_ratio - 0.5)`
-- Score: `distance_from_50_50 * 2` (max 1.0 points)
-- 100% calls = 1.0 points (maximum bullish conviction)
-- 100% puts = 1.0 points (maximum bearish conviction)
-- 50/50 split = 0.0 points (no directional bias)
+- **Volume Component (50% weight)**:
+  - Call Volume Ratio: `call_volume / (call_volume + put_volume)`
+  - Volume Distance: `abs(call_volume_ratio - 0.5) * 2`
+  - Volume Score: `volume_distance * 0.5 * direction` (max 0.5 points)
 
-**Note**: This scoring method weights heavy call and put directions equally, providing fair scoring for both bullish and bearish insider activity.
+- **Magnitude Component (50% weight)**:
+  - Call Magnitude Ratio: `call_magnitude / (call_magnitude + put_magnitude)`
+  - Magnitude Distance: `abs(call_magnitude_ratio - 0.5) * 2`
+  - Magnitude Score: `magnitude_distance * 0.5 * direction` (max 0.5 points)
 
-#### 4. Open Interest Change Score (0-2 points)
+- **Directional Consideration**:
+  - Direction = +1 for call bias, -1 for put bias
+  - Scores can counteract each other if directions differ
+  - Final Score: `abs(volume_score + magnitude_score)` (max 1.0 points)
 
-**Purpose**: Detect unusual increases in open interest (new positions being established)
+**Examples**:
+
+- 60% call volume + 70% call magnitude = 0.3 points (reinforcing)
+- 60% call volume + 60% put magnitude = 0.0 points (counteracting)
+
+#### 4. Volume:Open Interest Ratio Score (0-2 points)
+
+**Purpose**: Detect unusual trading activity relative to existing open interest positions
 
 **Calculation Method**:
 
-- Current Day Open Interest: Sum of all contract open interest
-- Prior Day Open Interest: Previous trading day's total open interest
-- Multiplier: `current_open_interest / prior_open_interest`
-- New Scoring Formula: `(multiplier - 1) / 2` (capped at 2.0)
-- 5.0x increase = 2.0 points (maximum score)
-- 3.0x increase = 1.0 points
-- 1.0x increase = 0.0 points (no change)
+- Current Day Volume:OI Ratio: `current_volume / current_open_interest` (calculated separately for calls and puts)
+- Historical Baseline: 30-day average volume:OI ratio for each symbol and contract type
+- Z-Score Analysis: `(current_ratio - historical_avg) / historical_stddev`
+- Call Score: `min(call_z_score, 4.0)/2` (max 2.0 points, only rewards above-average ratios)
+- Put Score: `min(put_z_score, 4.0)/2` (max 2.0 points, only rewards above-average ratios)
+- Final Score: Maximum of call or put score
+- Below-average ratios = 0.0 points (no reward for low activity)
 
-**Note**: This scoring method provides linear scaling where a 5x multiplier equals the maximum score of 2.0 points.
+**Note**: This scoring method identifies when current trading volume significantly exceeds historical patterns relative to existing open interest positions, indicating potential insider activity.
 
 #### 5. Time Pressure Score (0-2 points)
 
@@ -229,11 +260,11 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 **Total Score Calculation**:
 
 ```text
-Composite Score = Volume Score + Open Interest Score + OTM Score + Directional Score + Time Pressure Score
+Composite Score = Volume Score + Volume:OI Ratio Score + OTM Score + Directional Score + Time Pressure Score
 Maximum Possible: 10.0 points (3+2+2+1+2)
 ```
 
-**Alert Threshold**: Only symbols with `composite_score >= 7.0` are flagged as high-conviction
+**Alert Threshold**: Only symbols with `composite_score >= 7.5` are flagged as high-conviction
 
 **Volume Filtering**:
 
@@ -246,8 +277,9 @@ Maximum Possible: 10.0 points (3+2+2+1+2)
 **Example High-Conviction Detection**:
 
 ```text
-ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
+ARES: 1.8 + 1.5 + 2.0 + 0.8 + 1.5 = 7.6/10.0 (HIGH CONVICTION ALERT)
 - Volume: 9.6x normal call activity (statistical anomaly)
+- Volume:OI Ratio: 1.5/2.0 (high trading vs existing positions)
 - OTM: Heavy concentration in short-term out-of-money calls
 - Directional: 90% bias toward calls (extreme conviction)
 - Time: Moderate clustering in near-term expirations
@@ -255,10 +287,14 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 
 **Recent Improvements**:
 
-- **OTM Scoring Logic**: Now uses the score from the direction (calls vs puts) with the most total volume, rather than taking the maximum score
+- **Volume:OI Ratio Scoring**: Replaced open interest change scoring with volume:open interest ratio analysis using z-score methodology vs historical baseline
+- **Enhanced Data Tracking**: Now tracks call and put open interest separately, plus current ratios and z-scores for detailed analysis
+- **Improved Symbol Resolution**: Enhanced daily process with 3-step symbol resolution (option_contracts → API → regex fallback) and automatic mismatch detection
+- **Data Integrity Fixes**: Resolved symbol mismatches between daily_option_snapshot and option_contracts tables
+- **OTM Scoring Logic**: Uses the score from the direction (calls vs puts) with the most total volume, rather than taking the maximum score
 - **Time Pressure Bug Fix**: Fixed calculation to ensure contracts expiring within 7 days are counted towards both "this week" and "short-term" volume components
 - **Volume Display**: Added total volume column to all anomaly summary tables in both email notifications and Streamlit dashboard
-- **Directional Indicators**: Email and dashboard now show appropriate call/put multipliers based on dominant direction (e.g., "3.8x normal call volume" for bullish, "14.1x normal put volume" for bearish)
+- **Directional Indicators**: Email and dashboard show appropriate call/put multipliers based on dominant direction
 
 ### Detection Performance Metrics
 
@@ -271,8 +307,8 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 
 **Alert Quality Distribution**:
 
-- Score 7.0-10.0: Ultra-high conviction (manual investigation required)
-- Score 5.0-6.9: High anomaly (automated monitoring)
+- Score 7.5-10.0: Ultra-high conviction (manual investigation required)
+- Score 5.0-7.4: High anomaly (automated monitoring)
 - Score < 5.0: Normal market activity (no alert)
 
 ## Database Schema
@@ -312,7 +348,7 @@ ARES: 1.8 + 3.0 + 2.0 + 0.8 = 7.6/10.0 (HIGH CONVICTION ALERT)
 #### `daily_anomaly_snapshot`
 
 - **Purpose**: High-conviction insider trading alerts
-- **Key Fields**: event_date, symbol, total_score, volume_score, open_interest_score, otm_score, directional_score, time_score, call_volume, put_volume, total_volume, call_baseline_avg, put_baseline_avg, call_multiplier, put_multiplier, direction, pattern_description, z_score, otm_call_percentage, short_term_percentage, call_put_ratio, open_interest_change, open_interest, prior_open_interest, as_of_timestamp
+- **Key Fields**: event_date, symbol, total_score, volume_score, volume_oi_ratio_score, otm_score, directional_score, time_score, call_volume, put_volume, total_volume, call_baseline_avg, put_baseline_avg, call_multiplier, put_multiplier, direction, pattern_description, z_score, otm_call_percentage, short_term_percentage, call_put_ratio, call_open_interest, put_open_interest, call_volume_oi_ratio, put_volume_oi_ratio, call_volume_oi_z_score, put_volume_oi_z_score, call_volume_oi_avg, put_volume_oi_avg, open_interest, as_of_timestamp
 - **Retention**: 7 days (fixed)
 - **Update Frequency**: Every 15 minutes (during anomaly detection)
 
@@ -357,7 +393,7 @@ The system includes a comprehensive email notification system for alerting on hi
 - **Volume-based Filtering**: Separate sections for high volume (≥500) and low volume (<500) anomalies
 - **Directional Indicators**: Shows appropriate call/put multipliers based on dominant direction
 - **Insider Pattern Detection**: Indicates bullish, bearish, or mixed directional positioning
-- **Key Metrics Display**: Shows OTM scores, open interest changes, and other critical metrics
+- **Key Metrics Display**: Shows OTM scores, volume:OI ratio scores, and other critical metrics
 - **Configurable Thresholds**: Customizable via environment variables
 
 ### Email Content Structure
@@ -461,14 +497,14 @@ DAILY_RETENTION_DAYS=30
 
 **Daily Process** (`.github/workflows/daily.yml`):
 
-- Triggers: Daily at 8:00 AM EST (morning after business days)
-- Runs: `python daily_schedule.py --recent 3 --retention 30`
-- Purpose: Archive previous 3 days' data, update contracts, cleanup temp tables
+- Triggers: Daily at 9:00 AM EST (morning after business days)
+- Runs: `python daily_schedule.py --recent 3 --retention 30 --no-expired-contracts`
+- Purpose: Archive previous 3 days' data, update contracts, enhance with fresh open interest, cleanup temp tables
 
 **Intraday Process** (`.github/workflows/intraday.yml`):
 
 - Triggers: Every 15 minutes, Monday-Friday, 9:30 AM - 4:00 PM EST
-- Runs: `python intraday_schedule.py --retention 1 --options-limit 250`
+- Runs: `python intraday_schedule.py --retention 1`
 - Purpose: Real-time data collection, anomaly detection, and email alerts
 
 ### Monitoring and Alerts
@@ -501,53 +537,6 @@ DAILY_RETENTION_DAYS=30
 - Contract Updates: 5-15 minutes (depending on new contracts)
 - Total Runtime: ~10-20 minutes
 - API Calls: 0-50 (only for new contracts via smart incremental)
-
-### Scalability Considerations
-
-**Current Capacity**:
-
-- Symbols Tracked: 2,000+ active stocks
-- Options Contracts: 50,000+ active contracts
-- Daily Volume: 500,000+ option contract records
-- Historical Baseline: 30 days of complete market data
-
-**Performance Optimizations**:
-
-- Bulk database operations (COPY vs INSERT)
-- Smart incremental updates (only new data)
-- Efficient Z-score calculations with pre-computed baselines
-- Connection pooling and query optimization
-
-## Troubleshooting
-
-### Common Issues
-
-**"No high-conviction anomalies detected"**:
-
-- Normal condition - system is designed for quality over quantity
-- Indicates market activity is within normal statistical ranges
-
-**"No baseline data available"**:
-
-- Occurs on first run or after database reset
-- Requires 1-2 days of daily_option_snapshot data for baselines
-
-**Import errors after folder restructure**:
-
-- Ensure all imports use `database.core.connection` format
-- Check migrations have correct import paths
-
-### Performance Tuning
-
-**Increase Detection Sensitivity** (not recommended):
-
-- Lower alert threshold from 7.0 to 6.0 in `insider_anomaly_detection.py`
-- Reduce minimum volume threshold from 500 to 200
-
-**Optimize for Speed**:
-
-- Reduce `--options-limit` parameter for faster intraday runs
-- Increase retention periods to reduce daily processing load
 
 ## License and Compliance
 

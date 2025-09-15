@@ -43,7 +43,7 @@ class DataRetentionManager:
         # Basic U.S. market holidays - can be expanded
         holidays = []
         
-        # Add holidays... todo: do this better. 
+        # Add holidays for current and previous year 
         for year in [current_year - 1, current_year]:
             holidays.extend([
                 f"{year}-01-01",  # New Year's Day
