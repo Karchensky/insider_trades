@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.core.connection import db
 
 def get_ordered_anomaly_symbols(anomalies_df: pd.DataFrame) -> List[str]:
-    """Get anomaly symbols ordered by date descending, high volume first, low volume next, score descending."""
+    """Get anomaly symbols ordered by date descending, score descending."""
     if anomalies_df.empty:
         return []
     
@@ -36,7 +36,7 @@ def get_ordered_anomaly_symbols(anomalies_df: pd.DataFrame) -> List[str]:
         except (ValueError, TypeError):
             return default
     
-    # Create a list of tuples for sorting: (date, volume_type, score, symbol)
+    # Create a list of tuples for sorting: (date, score, symbol)
     symbol_data = []
     for _, row in anomalies_df.iterrows():
         try:
@@ -48,22 +48,18 @@ def get_ordered_anomaly_symbols(anomalies_df: pd.DataFrame) -> List[str]:
                 date_key = pd.to_datetime(row['as_of_timestamp']).date()
             
             if date_key:
-                total_volume = safe_numeric(row.get('total_volume', 0), as_int=True)
                 total_score = safe_numeric(row.get('total_score', 0))
                 symbol = str(row.get('symbol', ''))
                 
-                # Volume type: 0 for high volume (>=500), 1 for low volume (<500)
-                volume_type = 0 if total_volume >= 500 else 1
-                
-                symbol_data.append((date_key, volume_type, -total_score, symbol))  # Negative score for descending order
+                symbol_data.append((date_key, -total_score, symbol))  # Negative score for descending order
         except Exception as e:
             continue
     
-    # Sort by: date descending, volume type (high first), score descending
-    symbol_data.sort(key=lambda x: (-x[0].toordinal(), x[1], x[2]))
+    # Sort by: date descending, score descending
+    symbol_data.sort(key=lambda x: (-x[0].toordinal(), x[1]))
     
     # Extract symbols in order
-    return [item[3] for item in symbol_data]
+    return [item[2] for item in symbol_data]
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_current_anomalies() -> pd.DataFrame:
@@ -75,7 +71,7 @@ def get_current_anomalies() -> pd.DataFrame:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         # First check if we have any data
-        cur.execute("SELECT COUNT(*) as count FROM daily_anomaly_snapshot WHERE total_score >= 7.5")
+        cur.execute("SELECT COUNT(*) as count FROM daily_anomaly_snapshot WHERE total_score >= 7.5 AND total_magnitude >= 20000")
         count = cur.fetchone()['count']
         
         if count == 0:
@@ -107,7 +103,7 @@ def get_current_anomalies() -> pd.DataFrame:
                 event_date,
                 open_interest
             FROM daily_anomaly_snapshot
-            WHERE total_score >= 7.5
+            WHERE total_score >= 7.5 AND total_magnitude >= 20000
             ORDER BY total_score DESC, as_of_timestamp DESC
         """
         
@@ -255,7 +251,7 @@ def get_anomaly_timeline(days: int = 7) -> pd.DataFrame:
                 ARRAY_AGG(symbol ORDER BY total_score DESC) as symbols
             FROM daily_anomaly_snapshot
             WHERE event_date >= CURRENT_DATE - INTERVAL %s
-              AND total_score >= 7.5
+              AND total_score >= 7.5 AND total_magnitude >= 20000
             GROUP BY event_date
             ORDER BY event_date DESC
         """
@@ -287,13 +283,8 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
     
     st.subheader("High-Conviction Insider Trading Alerts")
     
-    # Separate high and low volume anomalies, then sort by score descending
-    high_volume_df = anomalies_df[anomalies_df['total_volume'] >= 500].copy()
-    low_volume_df = anomalies_df[anomalies_df['total_volume'] < 500].copy()
-    
-    # Sort each group by score descending
-    high_volume_df = high_volume_df.sort_values('total_score', ascending=False)
-    low_volume_df = low_volume_df.sort_values('total_score', ascending=False)
+    # Sort anomalies by score descending (all anomalies now meet magnitude threshold)
+    sorted_anomalies_df = anomalies_df.sort_values('total_score', ascending=False)
     
     # Helper function for safe numeric conversion
     def safe_numeric(value, default=0, as_int=False):
@@ -307,11 +298,11 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
         except (ValueError, TypeError):
             return default
     
-    # Process high volume anomalies
-    if not high_volume_df.empty:
-        st.write("**High Volume Anomalies (Volume ≥ 500)**")
+    # Process high conviction anomalies
+    if not sorted_anomalies_df.empty:
+        st.write("**High Conviction Anomalies (Score ≥ 7.5, Magnitude ≥ $20K)**")
         display_data = []
-        for _, row in high_volume_df.iterrows():
+        for _, row in sorted_anomalies_df.iterrows():
             try:
                 call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
                 put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
@@ -342,11 +333,19 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
                 volume_oi_ratio_score = safe_numeric(row.get('volume_oi_ratio_score', 0))
                 short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
                 
-                key_indicators = f"""• {volume_text}
-• {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
-• OTM Score: {otm_score:.1f}/2.0
-• Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0
-• Time Sensitivity: {short_term_percentage:.0f}% short-term"""
+                # Get additional data for detailed indicators
+                call_open_interest = safe_numeric(row.get('call_open_interest', 0))
+                put_open_interest = safe_numeric(row.get('put_open_interest', 0))
+                volume_score = safe_numeric(row.get('volume_score', 0))
+                directional_score = safe_numeric(row.get('directional_score', 0))
+                time_score = safe_numeric(row.get('time_score', 0))
+                
+                key_indicators = f"""• Volume Score: {volume_score:.1f}/3.0 ({volume_text})
+• Volume:OI Score: {volume_oi_ratio_score:.1f}/2.0 (Call: {call_volume:,} vs {call_open_interest:,} OI)
+• OTM Score: {otm_score:.1f}/2.0 (Out-of-money concentration)
+• Direction Score: {directional_score:.1f}/1.0 ({call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts)
+• Time Score: {time_score:.1f}/2.0 (Near-term expiration focus)
+• Magnitude: ${total_magnitude:,.0f} total (Call: ${call_magnitude:,.0f}, Put: ${put_magnitude:,.0f})"""
                 
                 # Handle timestamp safely
                 timestamp_str = 'N/A'
@@ -356,10 +355,16 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
                     except (AttributeError, ValueError):
                         timestamp_str = str(row['as_of_timestamp'])
                 
+                # Get magnitude data
+                call_magnitude = safe_numeric(row.get('call_magnitude', 0))
+                put_magnitude = safe_numeric(row.get('put_magnitude', 0))
+                total_magnitude = call_magnitude + put_magnitude
+                
                 display_data.append({
                     'Symbol': str(row.get('symbol', 'Unknown')),
                     'Score': f"{total_score:.1f}/10",
                     'Volume': f"{total_volume:,}",
+                    'Magnitude': f"${total_magnitude:,.0f}",
                     'Open Interest': f"{int(safe_numeric(row.get('open_interest', 0))):,}",
                     'Key Indicators': key_indicators,
                     'Insider Pattern': pattern,
@@ -381,77 +386,6 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
         )
     
     # Process low volume anomalies
-    if not low_volume_df.empty:
-        st.write("**Low Volume Anomalies (Volume < 500)**")
-        display_data = []
-        for _, row in low_volume_df.iterrows():
-            try:
-                call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
-                put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
-                total_volume = safe_numeric(row.get('total_volume', call_volume + put_volume), as_int=True)
-                call_baseline = safe_numeric(row.get('call_baseline_avg', 1), default=1)
-                put_baseline = safe_numeric(row.get('put_baseline_avg', 1), default=1)
-                call_multiplier = safe_numeric(row.get('call_multiplier', 0))
-                put_multiplier = safe_numeric(row.get('put_multiplier', 0))
-                
-                # Calculate indicators
-                call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
-                otm_score = safe_numeric(row.get('otm_score', 0))
-                
-                # Determine insider pattern and appropriate multiplier
-                if call_percentage >= 80:
-                    pattern = "Strong bullish insider activity"
-                    volume_text = f"{call_multiplier:.1f}x normal call volume"
-                elif call_percentage <= 20:
-                    pattern = "Strong bearish insider activity"
-                    volume_text = f"{put_multiplier:.1f}x normal put volume"
-                else:
-                    pattern = "Mixed directional positioning"
-                    volume_text = f"{call_multiplier:.1f}x call, {put_multiplier:.1f}x put"
-                
-                # Format key indicators using new data structure
-                z_score = safe_numeric(row.get('z_score', 0))
-                total_score = safe_numeric(row.get('total_score', 0))
-                volume_oi_ratio_score = safe_numeric(row.get('volume_oi_ratio_score', 0))
-                short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
-                
-                key_indicators = f"""• {volume_text}
-• {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
-• OTM Score: {otm_score:.1f}/2.0
-• Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0
-• Time Sensitivity: {short_term_percentage:.0f}% short-term"""
-                
-                # Handle timestamp safely
-                timestamp_str = 'N/A'
-                if pd.notna(row.get('as_of_timestamp')):
-                    try:
-                        timestamp_str = row['as_of_timestamp'].strftime('%H:%M:%S')
-                    except (AttributeError, ValueError):
-                        timestamp_str = str(row['as_of_timestamp'])
-                
-                display_data.append({
-                    'Symbol': str(row.get('symbol', 'Unknown')),
-                    'Score': f"{total_score:.1f}/10",
-                    'Volume': f"{total_volume:,}",
-                    'Open Interest': f"{int(safe_numeric(row.get('open_interest', 0))):,}",
-                    'Key Indicators': key_indicators,
-                    'Insider Pattern': pattern,
-                    'Timestamp': timestamp_str
-                })
-                
-            except Exception as e:
-                st.warning(f"Error processing row for symbol {row.get('symbol', 'Unknown')}: {e}")
-                continue
-        
-        # Create DataFrame for display
-        display_df = pd.DataFrame(display_data)
-        
-        # Style the table
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True
-        )
 
 def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
     """Create anomaly summary tables grouped by date, ordered by date descending."""
@@ -506,19 +440,14 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
         # Create subheader for the date
         st.subheader(f"Anomalies for {date.strftime('%Y-%m-%d')}")
         
-        # Separate high and low volume anomalies, then sort by score descending
-        high_volume_anomalies = [row for row in date_anomalies if safe_numeric(row.get('total_volume', 0), as_int=True) >= 500]
-        low_volume_anomalies = [row for row in date_anomalies if safe_numeric(row.get('total_volume', 0), as_int=True) < 500]
+        # Sort anomalies by score descending (all anomalies now meet magnitude threshold)
+        date_anomalies.sort(key=lambda x: safe_numeric(x.get('total_score', 0)), reverse=True)
         
-        # Sort each group by score descending
-        high_volume_anomalies.sort(key=lambda x: safe_numeric(x.get('total_score', 0)), reverse=True)
-        low_volume_anomalies.sort(key=lambda x: safe_numeric(x.get('total_score', 0)), reverse=True)
-        
-        # Process high volume anomalies
-        if high_volume_anomalies:
-            st.write("**High Volume Anomalies (Volume ≥ 500)**")
+        # Process high conviction anomalies
+        if date_anomalies:
+            st.write("**High Conviction Anomalies (Score ≥ 7.5, Magnitude ≥ $20K)**")
             display_data = []
-            for row in high_volume_anomalies:
+            for row in date_anomalies:
                 try:
                     call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
                     put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
@@ -549,11 +478,19 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                     volume_oi_ratio_score = safe_numeric(row.get('volume_oi_ratio_score', 0))
                     short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
                     
-                    key_indicators = f"""• {volume_text}
-• {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
-• OTM Score: {otm_score:.1f}/2.0
-• Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0
-• Time Sensitivity: {short_term_percentage:.0f}% short-term"""
+                    # Get additional data for detailed indicators
+                    call_open_interest = safe_numeric(row.get('call_open_interest', 0))
+                    put_open_interest = safe_numeric(row.get('put_open_interest', 0))
+                    volume_score = safe_numeric(row.get('volume_score', 0))
+                    directional_score = safe_numeric(row.get('directional_score', 0))
+                    time_score = safe_numeric(row.get('time_score', 0))
+                    
+                    key_indicators = f"""• Volume Score: {volume_score:.1f}/3.0 ({volume_text})
+• Volume:OI Score: {volume_oi_ratio_score:.1f}/2.0 (Call: {call_volume:,} vs {call_open_interest:,} OI)
+• OTM Score: {otm_score:.1f}/2.0 (Out-of-money concentration)
+• Direction Score: {directional_score:.1f}/1.0 ({call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts)
+• Time Score: {time_score:.1f}/2.0 (Near-term expiration focus)
+• Magnitude: ${total_magnitude:,.0f} total (Call: ${call_magnitude:,.0f}, Put: ${put_magnitude:,.0f})"""
                     
                     # Handle timestamp safely
                     timestamp_str = 'N/A'
@@ -563,10 +500,16 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                         except (AttributeError, ValueError):
                             timestamp_str = str(row['as_of_timestamp'])
                     
+                    # Get magnitude data
+                    call_magnitude = safe_numeric(row.get('call_magnitude', 0))
+                    put_magnitude = safe_numeric(row.get('put_magnitude', 0))
+                    total_magnitude = call_magnitude + put_magnitude
+                    
                     display_data.append({
                         'Symbol': str(row.get('symbol', 'Unknown')),
                         'Score': f"{total_score:.1f}/10",
                         'Volume': f"{total_volume:,}",
+                        'Magnitude': f"${total_magnitude:,.0f}",
                         'Open Interest': f"{int(safe_numeric(row.get('open_interest', 0))):,}",
                         'Key Indicators': key_indicators,
                         'Timestamp': timestamp_str
@@ -618,107 +561,6 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
             )
         
         # Process low volume anomalies
-        if low_volume_anomalies:
-            st.write("**Low Volume Anomalies (Volume < 500)**")
-            display_data = []
-            for row in low_volume_anomalies:
-                try:
-                    call_volume = safe_numeric(row.get('call_volume', 0), as_int=True)
-                    put_volume = safe_numeric(row.get('put_volume', 0), as_int=True)
-                    total_volume = safe_numeric(row.get('total_volume', call_volume + put_volume), as_int=True)
-                    call_baseline = safe_numeric(row.get('call_baseline_avg', 1), default=1)
-                    put_baseline = safe_numeric(row.get('put_baseline_avg', 1), default=1)
-                    call_multiplier = safe_numeric(row.get('call_multiplier', 0))
-                    put_multiplier = safe_numeric(row.get('put_multiplier', 0))
-                    
-                    # Calculate indicators
-                    call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
-                    otm_score = safe_numeric(row.get('otm_score', 0))
-                    
-                    # Determine insider pattern and appropriate multiplier
-                    if call_percentage >= 80:
-                        pattern = "Strong bullish insider activity"
-                        volume_text = f"{call_multiplier:.1f}x normal call volume"
-                    elif call_percentage <= 20:
-                        pattern = "Strong bearish insider activity"
-                        volume_text = f"{put_multiplier:.1f}x normal put volume"
-                    else:
-                        pattern = "Mixed directional positioning"
-                        volume_text = f"{call_multiplier:.1f}x call, {put_multiplier:.1f}x put"
-                    
-                    # Format key indicators using new data structure
-                    z_score = safe_numeric(row.get('z_score', 0))
-                    total_score = safe_numeric(row.get('total_score', 0))
-                    volume_oi_ratio_score = safe_numeric(row.get('volume_oi_ratio_score', 0))
-                    short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
-                    
-                    key_indicators = f"""• {volume_text}
-• {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
-• OTM Score: {otm_score:.1f}/2.0
-• Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0
-• Time Sensitivity: {short_term_percentage:.0f}% short-term"""
-                    
-                    # Handle timestamp safely
-                    timestamp_str = 'N/A'
-                    if pd.notna(row.get('as_of_timestamp')):
-                        try:
-                            timestamp_str = row['as_of_timestamp'].strftime('%H:%M:%S')
-                        except (AttributeError, ValueError):
-                            timestamp_str = str(row['as_of_timestamp'])
-                    
-                    display_data.append({
-                        'Symbol': str(row.get('symbol', 'Unknown')),
-                        'Score': f"{total_score:.1f}/10",
-                        'Volume': f"{total_volume:,}",
-                        'Open Interest': f"{int(safe_numeric(row.get('open_interest', 0))):,}",
-                        'Key Indicators': key_indicators,
-                        'Timestamp': timestamp_str
-                    })
-                    
-                except Exception as e:
-                    st.warning(f"Error processing row for symbol {row.get('symbol', 'Unknown')}: {e}")
-                    continue
-            
-            # Create DataFrame for display
-            display_df = pd.DataFrame(display_data)
-            
-            # Style the table with column configuration
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Key Indicators": st.column_config.TextColumn(
-                        "Key Indicators",
-                        width="large",
-                        help="Detailed trading indicators and metrics"
-                    ),
-                    "Symbol": st.column_config.TextColumn(
-                        "Symbol",
-                        width="small"
-                    ),
-                    "Score": st.column_config.TextColumn(
-                        "Score",
-                        width="small"
-                    ),
-                    "Volume": st.column_config.TextColumn(
-                        "Volume",
-                        width="small"
-                    ),
-                    "Open Interest": st.column_config.TextColumn(
-                        "Open Interest",
-                        width="small"
-                    ),
-                    "Insider Pattern": st.column_config.TextColumn(
-                        "Insider Pattern",
-                        width="small"
-                    ),
-                    "Timestamp": st.column_config.TextColumn(
-                        "Timestamp",
-                        width="small"
-                    )
-                }
-            )
         
         # Add some spacing between date groups
         st.markdown("---")
@@ -957,14 +799,14 @@ def get_performance_matrix_data() -> pd.DataFrame:
                 INNER JOIN daily_stock_snapshot b
                     ON a.symbol = b.symbol
                     AND a.event_date = b.date
-                WHERE a.total_score >= 7.5
+                WHERE a.total_score >= 7.5 
+                AND a.total_magnitude >= 20000
                 ORDER BY a.symbol, a.event_date
             )
             SELECT 
                 a.symbol,
                 a.total_score,
                 a.direction,
-                CASE WHEN a.total_volume >= 500 THEN 'High' ELSE 'Low' END as volume_type,
                 b.date - a.event_date as day_number,
                 b.close as close_price,
                 a.weighted_average_price as starting_price
@@ -1006,7 +848,7 @@ def create_performance_matrix() -> None:
     
     # Create pivot table
     pivot_df = perf_df.pivot_table(
-        index=['symbol', 'direction', 'volume_type'],
+        index=['symbol', 'direction'],
         columns='day_number',
         values='price_movement',
         aggfunc='first'
@@ -1051,10 +893,6 @@ def create_performance_matrix() -> None:
         selected_directions = st.multiselect("Filter by Direction", available_directions, default=available_directions)
     
     with col2:
-        # Volume Type filter
-        available_volume_types = sorted(perf_df['volume_type'].unique())
-        selected_volume_types = st.multiselect("Filter by Volume Type", available_volume_types, default=available_volume_types)
-        
         # Score Group filter
         available_score_groups = sorted(perf_df['score_group'].unique())
         selected_score_groups = st.multiselect("Filter by Score Group", available_score_groups, default=available_score_groups)
@@ -1063,7 +901,6 @@ def create_performance_matrix() -> None:
     perf_df = perf_df[
         (perf_df['symbol'].isin(selected_symbols)) &
         (perf_df['direction'].isin(selected_directions)) &
-        (perf_df['volume_type'].isin(selected_volume_types)) &
         (perf_df['score_group'].isin(selected_score_groups))
     ]
     
@@ -1130,21 +967,6 @@ def create_performance_timeseries_chart(perf_df: pd.DataFrame, selected_row: str
                 y=direction_data['price_movement'],
                 mode='lines+markers',
                 name=direction,
-                line=dict(width=3),
-                hovertemplate='%{fullData.name}: %{y:.2f}%<extra></extra>'
-            ))
-    elif selected_row == 'volume_type':
-        # Group by volume_type and day_number
-        plot_data = perf_df.groupby(['volume_type', 'day_number'])['price_movement'].mean().reset_index()
-        
-        fig = go.Figure()
-        for volume_type in plot_data['volume_type'].unique():
-            volume_data = plot_data[plot_data['volume_type'] == volume_type]
-            fig.add_trace(go.Scatter(
-                x=volume_data['day_number'],
-                y=volume_data['price_movement'],
-                mode='lines+markers',
-                name=f"{volume_type} Volume",
                 line=dict(width=3),
                 hovertemplate='%{fullData.name}: %{y:.2f}%<extra></extra>'
             ))

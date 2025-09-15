@@ -88,7 +88,7 @@ def main():
     # Unified symbol selection
     st.sidebar.subheader("Symbol Selection")
     
-    # Show anomaly symbols first, ordered by date descending, high volume first, low volume next, score descending
+    # Show anomaly symbols first, ordered by date descending, score descending
     # Then all other symbols alphabetically
     ordered_anomaly_symbols = get_ordered_anomaly_symbols(anomalies_df)
     other_symbols = sorted([s for s in available_symbols if s not in ordered_anomaly_symbols])

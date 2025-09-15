@@ -118,10 +118,12 @@ class InsiderAnomalyDetector:
                         o.greeks_gamma,
                         o.greeks_theta,
                         o.greeks_vega,
+                        oc.shares_per_contract,
                         COALESCE(s.day_close, s.day_vwap, o.underlying_price, 0) as underlying_price,
                         o.as_of_timestamp
                     FROM latest_temp_option o
                     LEFT JOIN latest_temp_stock s ON o.symbol = s.symbol
+                    LEFT JOIN option_contracts oc ON o.contract_ticker = oc.contract_ticker
                     WHERE COALESCE(s.day_close, s.day_vwap, o.underlying_price, 0) > 0
                       AND o.contract_type IN ('call', 'put')
                       AND o.expiration_date >= CURRENT_DATE
@@ -309,6 +311,27 @@ class InsiderAnomalyDetector:
             call_open_interest = int(sum(c.get('open_interest', 0) for c in contracts if c['contract_type'] == 'call'))
             put_open_interest = int(sum(c.get('open_interest', 0) for c in contracts if c['contract_type'] == 'put'))
             
+            # Calculate call and put magnitude separately (volume * price * shares_per_contract)
+            # shares_per_contract is already fetched in the main query, so no additional DB lookup needed
+            call_magnitude = 0
+            put_magnitude = 0
+            
+            for c in contracts:
+                volume = c['session_volume']
+                price = c.get('session_close', 0)
+                shares_per_contract = c.get('shares_per_contract', 100)  # Default to 100 if not found
+                
+                magnitude = volume * price * shares_per_contract
+                
+                if c['contract_type'] == 'call':
+                    call_magnitude += magnitude
+                else:
+                    put_magnitude += magnitude
+            
+            call_magnitude = int(call_magnitude)
+            put_magnitude = int(put_magnitude)
+            total_magnitude = call_magnitude + put_magnitude
+            
             # Process all symbols regardless of volume
             
             # Get baseline data for this symbol
@@ -324,7 +347,7 @@ class InsiderAnomalyDetector:
             volume_score = self._calculate_volume_anomaly_score_v2(call_volume, put_volume, call_baseline, put_baseline)
             volume_oi_ratio_score = self._calculate_volume_oi_ratio_score(call_volume, put_volume, call_open_interest, put_open_interest, call_baseline, put_baseline)
             otm_score = self._calculate_otm_call_score_v2(contracts)
-            directional_score = self._calculate_directional_bias_score_v2(call_volume, put_volume, total_volume)
+            directional_score = self._calculate_directional_bias_score_v2(call_volume, put_volume, total_volume, call_magnitude, put_magnitude, total_magnitude)
             time_pressure_score = self._calculate_time_pressure_score_v2(contracts)
             
             # Calculate additional metrics for enhanced storage
@@ -375,7 +398,8 @@ class InsiderAnomalyDetector:
                 'symbol': symbol,
                 'composite_score': rounded_composite_score,
                 'total_volume': total_volume,  # Add total_volume at top level for email filtering
-                'anomaly_types': ['insider_activity'] if rounded_composite_score >= 7.5 else ['low_score_activity'],
+                'total_magnitude': total_magnitude,  # Add total_magnitude for filtering
+                'anomaly_types': ['insider_activity'] if rounded_composite_score >= 7.5 and total_magnitude >= 20000 else ['low_score_activity'],
                 'total_anomalies': 1,
                 'details': {
                     'volume_score': round(volume_score, 1),
@@ -386,6 +410,9 @@ class InsiderAnomalyDetector:
                     'call_volume': call_volume,
                     'put_volume': put_volume,
                     'total_volume': total_volume,
+                    'call_magnitude': call_magnitude,
+                    'put_magnitude': put_magnitude,
+                    'total_magnitude': total_magnitude,
                     'call_open_interest': call_open_interest,
                     'put_open_interest': put_open_interest,
                     'call_baseline_avg': call_baseline_avg,
@@ -406,8 +433,8 @@ class InsiderAnomalyDetector:
             # Collect all anomaly data for bulk processing
             all_anomaly_data.append(anomaly_data)
             
-            # Only flag high-conviction cases (score >= 7.5) for notifications
-            if rounded_composite_score >= 7.5:
+            # Only flag high-conviction cases (score >= 7.5 AND magnitude >= $20,000) for notifications
+            if rounded_composite_score >= 7.5 and total_magnitude >= 20000:
                 high_conviction_symbols[symbol] = anomaly_data
         
         # Bulk store all anomaly data
@@ -580,20 +607,37 @@ class InsiderAnomalyDetector:
         
         return min(score, 2.0)  # Cap at 2.0
     
-    def _calculate_directional_bias_score_v2(self, call_volume: int, put_volume: int, total_volume: int) -> float:
-        """Calculate directional bias score (0-1 points) - weights call and put directions equally."""
-        if total_volume == 0:
+    def _calculate_directional_bias_score_v2(self, call_volume: int, put_volume: int, total_volume: int, 
+                                            call_magnitude: float, put_magnitude: float, total_magnitude: float) -> float:
+        """Calculate directional bias score (0-1 points) using both volume and magnitude with directional consideration."""
+        if total_volume == 0 or total_magnitude == 0:
             return 0.0
         
-        call_ratio = call_volume / total_volume
+        # Calculate volume-based directional bias
+        call_volume_ratio = call_volume / total_volume
+        volume_distance_from_50_50 = abs(call_volume_ratio - 0.5)
+        volume_score = volume_distance_from_50_50 * 2  # Max 1.0 for 100% calls or puts
         
-        # Calculate distance from 0.5 (50/50 split) and multiply by 2
-        # This gives max score of 1.0 for 100% calls or 100% puts
-        # Min score of 0.0 for exactly 50/50 split
-        distance_from_50_50 = abs(call_ratio - 0.5)
-        score = distance_from_50_50 * 2
+        # Calculate magnitude-based directional bias
+        call_magnitude_ratio = call_magnitude / total_magnitude
+        magnitude_distance_from_50_50 = abs(call_magnitude_ratio - 0.5)
+        magnitude_score = magnitude_distance_from_50_50 * 2  # Max 1.0 for 100% calls or puts
         
-        return min(score, 1.0)  # Cap at 1.0
+        # Determine direction for each component
+        volume_call_direction = 1 if call_volume_ratio > 0.5 else -1  # 1 for call bias, -1 for put bias
+        magnitude_call_direction = 1 if call_magnitude_ratio > 0.5 else -1  # 1 for call bias, -1 for put bias
+        
+        # Calculate directional scores (0 to 0.5 each)
+        volume_directional_score = volume_score * 0.5 * volume_call_direction
+        magnitude_directional_score = magnitude_score * 0.5 * magnitude_call_direction
+        
+        # Combine scores - they can counteract each other if directions differ
+        total_directional_score = volume_directional_score + magnitude_directional_score
+        
+        # Convert back to absolute score (0 to 1.0)
+        final_score = abs(total_directional_score)
+        
+        return min(final_score, 1.0)  # Cap at 1.0
     
     def _calculate_time_pressure_score_v2(self, contracts: List[Dict]) -> float:
         """Calculate time pressure score based on expiration clustering (0-2 points)."""
@@ -719,6 +763,9 @@ class InsiderAnomalyDetector:
                         details.get('put_volume_oi_z_score', 0),
                         details.get('call_volume_oi_avg', 0),
                         details.get('put_volume_oi_avg', 0),
+                        details.get('call_magnitude', 0),  # call_magnitude
+                        details.get('put_magnitude', 0),  # put_magnitude
+                        details.get('total_magnitude', 0),  # total_magnitude
                         datetime.now(self.est_tz)
                     )
                     bulk_data.append(row_data)
@@ -735,6 +782,7 @@ class InsiderAnomalyDetector:
                         z_score, otm_call_percentage, short_term_percentage, call_put_ratio,
                         call_open_interest, put_open_interest, call_volume_oi_ratio, put_volume_oi_ratio,
                         call_volume_oi_z_score, put_volume_oi_z_score, call_volume_oi_avg, put_volume_oi_avg,
+                        call_magnitude, put_magnitude, total_magnitude,
                         as_of_timestamp
                     ) VALUES %s
                     ON CONFLICT (event_date, symbol)
@@ -767,6 +815,9 @@ class InsiderAnomalyDetector:
                         put_volume_oi_z_score = EXCLUDED.put_volume_oi_z_score,
                         call_volume_oi_avg = EXCLUDED.call_volume_oi_avg,
                         put_volume_oi_avg = EXCLUDED.put_volume_oi_avg,
+                        call_magnitude = EXCLUDED.call_magnitude,
+                        put_magnitude = EXCLUDED.put_magnitude,
+                        total_magnitude = EXCLUDED.total_magnitude,
                         as_of_timestamp = EXCLUDED.as_of_timestamp,
                         updated_at = CURRENT_TIMESTAMP
                 """

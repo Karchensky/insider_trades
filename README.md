@@ -203,16 +203,29 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 
 #### 3. Directional Bias Score (0-1 points)
 
-**Purpose**: Detect strong call/put preference indicating insider conviction
+**Purpose**: Detect strong call/put preference indicating insider conviction using both volume and magnitude
 
 **Calculation Method**:
 
-- Call Ratio: `call_volume / (call_volume + put_volume)`
-- Distance from 50/50: `abs(call_ratio - 0.5)`
-- Score: `distance_from_50_50 * 2` (max 1.0 points)
-- 100% calls = 1.0 points (maximum bullish conviction)
-- 100% puts = 1.0 points (maximum bearish conviction)
-- 50/50 split = 0.0 points (no directional bias)
+- **Volume Component (50% weight)**:
+  - Call Volume Ratio: `call_volume / (call_volume + put_volume)`
+  - Volume Distance: `abs(call_volume_ratio - 0.5) * 2`
+  - Volume Score: `volume_distance * 0.5 * direction` (max 0.5 points)
+
+- **Magnitude Component (50% weight)**:
+  - Call Magnitude Ratio: `call_magnitude / (call_magnitude + put_magnitude)`
+  - Magnitude Distance: `abs(call_magnitude_ratio - 0.5) * 2`
+  - Magnitude Score: `magnitude_distance * 0.5 * direction` (max 0.5 points)
+
+- **Directional Consideration**:
+  - Direction = +1 for call bias, -1 for put bias
+  - Scores can counteract each other if directions differ
+  - Final Score: `abs(volume_score + magnitude_score)` (max 1.0 points)
+
+**Examples**:
+
+- 60% call volume + 70% call magnitude = 0.3 points (reinforcing)
+- 60% call volume + 60% put magnitude = 0.0 points (counteracting)
 
 #### 4. Volume:Open Interest Ratio Score (0-2 points)
 
