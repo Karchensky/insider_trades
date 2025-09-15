@@ -35,7 +35,8 @@ logger = logging.getLogger(__name__)
 
 def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
                        force: bool, ticker_limit: int | None, contract_limit: int | None,
-                       dry_run_retention: bool, anomaly_retention: int = 30) -> int:
+                       dry_run_retention: bool, anomaly_retention: int = 30, 
+                       no_expired_contracts: bool = False) -> int:
     start_ts = datetime.now()
 
     # 1) Determine recent trading day range
@@ -82,7 +83,8 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
         contracts_scraper = PolygonOptionContractsScraper()
         
         # Use smart incremental approach - only process symbols with new contracts
-        contracts_results = contracts_scraper.scrape_incremental_smart(symbol_limit=ticker_limit)
+        contract_retention_days = 0 if no_expired_contracts else retention_days
+        contracts_results = contracts_scraper.scrape_incremental_smart(symbol_limit=ticker_limit, retention_days=contract_retention_days)
         
         if contracts_results.get('success'):
             if contracts_results.get('symbols_processed', 0) > 0:
@@ -101,33 +103,194 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
         logger.error(f"[option_contracts] Failed to load contract metadata: {contracts_error}")
         # Continue with pipeline even if contracts fail
 
-    # Update daily_option_snapshot with latest analytics data from temp_option for the processed dates
-    logger.info("[daily_option_snapshot] Updating analytics columns with latest temp data...")
+    # Step 4: Check and fix symbol mismatches between daily_option_snapshot and option_contracts
+    logger.info("[symbol_mismatch_check] Step 4: Checking for symbol mismatches...")
+    try:
+        from database.core.connection import db
+        
+        # Check for mismatches
+        mismatch_query = """
+            SELECT a.symbol, a.contract_ticker, b.symbol as contract_symbol, b.underlying_ticker
+            FROM (SELECT DISTINCT symbol, contract_ticker FROM daily_option_snapshot) a
+            INNER JOIN option_contracts b ON a.contract_ticker = b.contract_ticker
+            WHERE a.symbol <> b.symbol
+        """
+        
+        mismatches = db.execute_query(mismatch_query)
+        
+        if mismatches:
+            logger.warning(f"[symbol_mismatch_check] Found {len(mismatches)} symbol mismatches")
+            
+            # Fix mismatches by updating daily_option_snapshot to match option_contracts
+            conn = db.connect()
+            try:
+                with conn.cursor() as cur:
+                    total_updated = 0
+                    
+                    for mismatch in mismatches:
+                        contract_ticker = mismatch['contract_ticker']
+                        correct_symbol = mismatch['contract_symbol']
+                        
+                        # Update all records for this contract_ticker
+                        cur.execute("""
+                            UPDATE daily_option_snapshot 
+                            SET symbol = %s, updated_at = CURRENT_TIMESTAMP
+                            WHERE contract_ticker = %s
+                        """, (correct_symbol, contract_ticker))
+                        
+                        records_updated = cur.rowcount
+                        total_updated += records_updated
+                        logger.info(f"[symbol_mismatch_check] Fixed {contract_ticker}: {records_updated} records -> '{correct_symbol}'")
+                    
+                    conn.commit()
+                    logger.info(f"[symbol_mismatch_check] ✓ Fixed {total_updated} total records across {len(mismatches)} contracts")
+                    
+            finally:
+                conn.close()
+        else:
+            logger.info("[symbol_mismatch_check] ✓ No symbol mismatches found")
+            
+    except Exception as mismatch_error:
+        logger.error(f"[symbol_mismatch_check] Failed to check/fix symbol mismatches: {mismatch_error}")
+        # Continue with pipeline even if mismatch check fails
+
+    # Step 5: Update daily_option_snapshot with Greeks and IV from prior day's temp data
+    # Only update the most recent business day with prior day's temp data
+    logger.info("[daily_option_snapshot] Step 5a: Updating Greeks and IV with prior day's temp data...")
     from database.core.bulk_operations import BulkStockDataLoader as _Loader
     _l = _Loader()
-    cur = s
-    while cur <= e:
-        ds = cur.strftime('%Y-%m-%d')
+    
+    # Get the most recent business day before current run date
+    current_date = _dt.now().date()
+    most_recent_business_day = stock_scraper.get_most_recent_trading_day()
+    
+    # Only update if the most recent business day is before current date
+    if most_recent_business_day < current_date.strftime('%Y-%m-%d'):
+        logger.info(f"[daily_option_snapshot] Updating Greeks/IV for most recent business day: {most_recent_business_day}")
         try:
-            out = _l.update_daily_option_snapshot_analytics_from_temp(ds)
-            logger.info(f"[daily_option_snapshot] {ds} updated={out['records_updated']} records with latest analytics in {out['execution_time']:.2f}s")
+            out = _l.update_daily_option_snapshot_greeks_and_iv_from_temp(most_recent_business_day)
+            logger.info(f"[daily_option_snapshot] {most_recent_business_day} updated={out['records_updated']} records with Greeks/IV in {out['execution_time']:.2f}s")
         except Exception as ce:
-            logger.error(f"[daily_option_snapshot] {ds} analytics update failed: {ce}")
-        cur += _td(days=1)
+            logger.error(f"[daily_option_snapshot] {most_recent_business_day} Greeks/IV update failed: {ce}")
+    else:
+        logger.info(f"[daily_option_snapshot] Skipping Greeks/IV update - most recent business day ({most_recent_business_day}) is current date")
+
+    # Step 6: Run fresh temp_option data to get correct open_interest for the dates being processed
+    logger.info("[temp_option] Step 5b: Running fresh intraday snapshot to get correct open_interest...")
+    try:
+        from scrapers.polygon_unified_options_snapshot_scraper import UnifiedOptionsSnapshotScraper
+        from database.core.bulk_operations import BulkStockDataLoader
+        
+        opt_scraper = UnifiedOptionsSnapshotScraper()
+        loader = BulkStockDataLoader()
+        
+        # Get all contract tickers from the dates we're processing
+        from database.core.connection import db
+        contract_tickers = set()
+        cur = s
+        while cur <= e:
+            ds = cur.strftime('%Y-%m-%d')
+            try:
+                if stock_scraper.is_trading_day(cur):
+                    rows = db.execute_query("SELECT DISTINCT contract_ticker FROM daily_option_snapshot WHERE date = %s", (ds,))
+                    contract_tickers.update([r['contract_ticker'] for r in rows])
+            except Exception:
+                pass
+            cur += _td(days=1)
+        
+        if contract_tickers:
+            logger.info(f"[temp_option] Fetching fresh data for {len(contract_tickers)} contracts...")
+            
+            # Use super-batch approach like intraday schedule
+            ticker_list = list(contract_tickers)
+            page_size = 250  # Per-request ticker count
+            bulk_calls = 100  # Calls per super-batch
+            options_workers = 20  # Concurrent workers
+            
+            import math
+            total_pages = math.ceil(len(ticker_list) / page_size)
+            total_bulk_loads = math.ceil(total_pages / bulk_calls)
+            
+            logger.info(f"[temp_option] Planning: {len(ticker_list)} contracts, pages(@{page_size})={total_pages}, bulk_loads(@{bulk_calls} calls)={total_bulk_loads}")
+            
+            # Create request batches
+            request_batches = []
+            for i in range(0, len(ticker_list), page_size):
+                batch = ticker_list[i:i + page_size]
+                request_batches.append(batch)
+            
+            # Process in super-batches
+            total_loaded = 0
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            for start in range(0, len(request_batches), bulk_calls):
+                group = request_batches[start:start+bulk_calls]
+                logger.info(f"[temp_option] Fetching super-batch {(start//bulk_calls)+1}/{total_bulk_loads} ({len(group)} calls)")
+                
+                combined_results = []
+                requested_in_group = set(t for batch in group for t in batch)
+                
+                with ThreadPoolExecutor(max_workers=options_workers) as ex:
+                    future_map = {ex.submit(opt_scraper.fetch_by_tickers, batch): idx for idx, batch in enumerate(group)}
+                    for fut in as_completed(future_map):
+                        try:
+                            data = fut.result()
+                            res = data.get('results') or []
+                            if res:
+                                combined_results.extend(res)
+                        except Exception as fe:
+                            logger.error(f"fetch_by_tickers failed in super-batch at request {future_map[fut]}: {fe}")
+                
+                # Deduplicate across calls by ticker, keep latest by last_updated
+                if combined_results:
+                    by_ticker = {}
+                    for r in combined_results:
+                        tk = r.get('ticker')
+                        if not tk:
+                            continue
+                        lu = r.get('last_updated') or 0
+                        if tk not in by_ticker or (by_ticker[tk].get('last_updated') or 0) < lu:
+                            by_ticker[tk] = r
+                    combined_results = list(by_ticker.values())
+                
+                # Load super-batch
+                if combined_results:
+                    out = loader.bulk_upsert_temp_option_copy({'results': combined_results})
+                    if out.get('success'):
+                        total_loaded += out['records_processed']
+                        logger.info(f"[temp_option] Super-batch loaded: {out['records_processed']} rows (total={total_loaded})")
+                    else:
+                        logger.error(f"[temp_option] Super-batch load failed: {out.get('error')}")
+            
+            logger.info(f"[temp_option] ✓ Fresh intraday data loaded: {total_loaded} total rows - open_interest now reflects correct dates")
+        else:
+            logger.warning("[temp_option] No contract tickers found for processing dates")
+            
+    except Exception as temp_error:
+        logger.error(f"[temp_option] Failed to load fresh intraday data: {temp_error}")
+        logger.warning("[temp_option] Continuing with stale temp data (open_interest may be incorrect)")
+
+    # Step 7: Update daily_option_snapshot with fresh open_interest data only
+    # Only update the most recent business day before current run date
+    logger.info("[daily_option_snapshot] Step 5c: Updating open_interest with fresh temp data...")
+    
+    # Get the most recent business day before current run date
+    from datetime import datetime as _dt, timedelta as _td
+    current_date = _dt.now().date()
+    most_recent_business_day = stock_scraper.get_most_recent_trading_day()
+    
+    # Only update if the most recent business day is before current date
+    if most_recent_business_day < current_date.strftime('%Y-%m-%d'):
+        logger.info(f"[daily_option_snapshot] Updating open_interest for most recent business day: {most_recent_business_day}")
+        try:
+            out = _l.update_daily_option_snapshot_open_interest_from_temp(most_recent_business_day)
+            logger.info(f"[daily_option_snapshot] {most_recent_business_day} updated={out['records_updated']} records with fresh open_interest in {out['execution_time']:.2f}s")
+        except Exception as ce:
+            logger.error(f"[daily_option_snapshot] {most_recent_business_day} open_interest update failed: {ce}")
+    else:
+        logger.info(f"[daily_option_snapshot] Skipping open_interest update - most recent business day ({most_recent_business_day}) is current date")
 
     logger.info("[anomaly_retention] Keeping daily_anomaly_snapshot data for ongoing analysis")
-    
-    # Clean up old daily_anomaly_snapshot data using retention
-    try:
-        from database.core.connection import db as _db
-        conn = _db.connect()
-        with conn.cursor() as cur:
-            cur.execute("SELECT cleanup_old_anomalies(%s);", (anomaly_retention,))
-            deleted_count = cur.fetchone()[0]
-            conn.commit()
-        logger.info(f"[anomaly_retention] Cleaned up {deleted_count} old anomaly records ({anomaly_retention}+ days)")
-    except Exception as ae:
-        logger.error(f"[anomaly_retention] Failed to cleanup old anomaly data: {ae}")
 
     # Truncate temp_option and temp_stock to keep only fresh intraday going forward
     # Note: daily_anomaly_snapshot is NOT truncated to preserve ongoing anomaly analysis
@@ -143,11 +306,8 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     except Exception as te:
         logger.error(f"[temp_option] truncate failed: {te}")
 
-    # 5) Retention cleanup for core tables (using bulk deletion for efficiency)
-    logger.info("Applying retention policy with bulk deletion…")
-    retention = DataRetentionManager()
-    # Step 5: Truncate temp tables (intraday data no longer needed after daily processing)
-    logger.info("Step 5: Truncating temp tables...")
+    # Step 8: Truncate temp tables (intraday data no longer needed after daily processing)
+    logger.info("Step 8: Truncating temp tables...")
     try:
         from database.core.connection import db as _db
         _conn = _db.connect()
@@ -159,7 +319,9 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     except Exception as e:
         logger.error(f"✗ Failed to truncate temp tables: {e}")
     
-    # Step 6: Retention cleanup for historical and anomaly data
+    # Step 9: Retention cleanup for all historical data
+    logger.info("Applying retention policy with bulk deletion…")
+    retention = DataRetentionManager()
     tables_to_clean = [
         ('daily_stock_snapshot', 'date', False),
         ('daily_option_snapshot', 'date', False),
@@ -196,6 +358,8 @@ def main():
     parser.add_argument('--dry-run-retention', action='store_true', help='Do not delete rows; report only')
     parser.add_argument('--anomaly-retention', type=int, default=int(os.getenv('ANOMALY_RETENTION_DAYS', '30')), 
                         help='Anomaly retention in days (default: 30)')
+    parser.add_argument('--no-expired-contracts', action='store_true', 
+                        help='Skip fetching expired contracts (active only)')
 
     args = parser.parse_args()
 
@@ -209,6 +373,7 @@ def main():
             contract_limit=args.contract_limit,
             dry_run_retention=args.dry_run_retention,
             anomaly_retention=args.anomaly_retention,
+            no_expired_contracts=args.no_expired_contracts,
         ))
     except Exception as e:
         logger.error(f"Daily pipeline failed: {e}")

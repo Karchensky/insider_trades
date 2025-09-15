@@ -27,7 +27,7 @@ class EmailNotifier:
         self.use_ssl = self.smtp_port == 465  # Use SSL for port 465
         self.from_email = os.getenv('SENDER_EMAIL', self.smtp_user)
         self.to_emails = self._parse_recipient_emails(os.getenv('RECIPIENT_EMAIL', ''))
-        self.min_score = float(os.getenv('ANOMALY_ALERT_MIN_SCORE', '7.0'))
+        self.min_score = float(os.getenv('ANOMALY_ALERT_MIN_SCORE', '7.5'))
         self.enabled = os.getenv('ANOMALY_EMAIL_ENABLED', 'true').lower() == 'true'
     
     def _parse_recipient_emails(self, recipient_string: str) -> List[str]:
@@ -73,40 +73,42 @@ class EmailNotifier:
             logger.info("No anomalies to report")
             return True
             
-        # Filter anomalies by minimum score and volume
+        # Filter anomalies by minimum score and magnitude
         high_conviction_anomalies = {
             symbol: data for symbol, data in anomalies.items()
-            if data.get('composite_score', 0) >= self.min_score and data.get('total_volume', 0) > 500
+            if data.get('composite_score', 0) >= self.min_score and data.get('total_magnitude', 0) >= 20000
         }
         
         if not high_conviction_anomalies:
-            logger.info(f"No anomalies detected: No symbols scored >= {self.min_score} with volume > 500")
+            logger.info(f"No anomalies detected: No symbols scored >= {self.min_score} with magnitude >= $20,000")
             return False  # Return False to indicate no email was sent
             
         try:
             # Create email content
-            subject = f"INSIDER TRADING ALERT: {len(high_conviction_anomalies)} High-Conviction Anomalies (Score≥{self.min_score}, Volume>500)"
+            total_anomalies = len(high_conviction_anomalies)
+            subject = f"INSIDER TRADING ALERT: {total_anomalies} High-Conviction Anomalies (Score≥{self.min_score}, Magnitude≥$20K)"
             html_content = self._create_email_content(high_conviction_anomalies)
             
             # Send email
             self._send_email(subject, html_content)
-            logger.info(f"Email alert sent for {len(high_conviction_anomalies)} anomalies")
+            logger.info(f"Email alert sent for {total_anomalies} anomalies (score≥{self.min_score}, magnitude≥$20K)")
             return True
             
         except Exception as e:
             logger.error(f"Failed to send email alert: {e}")
             return False
     
-    def _create_email_content(self, anomalies: Dict[str, Dict]) -> str:
+    def _create_email_content(self, high_conviction_anomalies: Dict[str, Dict]) -> str:
         """Create HTML email content with anomaly details."""
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S EST')
         
         # Sort anomalies by score descending
         sorted_anomalies = sorted(
-            anomalies.items(), 
+            high_conviction_anomalies.items(), 
             key=lambda x: x[1].get('composite_score', 0), 
             reverse=True
         )
+        
         
         html = f"""
         <html>
@@ -134,86 +136,130 @@ class EmailNotifier:
             
             <div class="summary">
                 <h2>Alert Summary</h2>
-                <p><strong>{len(sorted_anomalies)} symbols</strong> detected with high-conviction insider trading patterns (score ≥ {self.min_score}/10.0, volume > 500)</p>
+                <p><strong>{len(sorted_anomalies)} symbols</strong> detected with high-conviction insider trading patterns (score ≥ {self.min_score}/10.0, magnitude ≥ $20,000)</p>
                 <p>These anomalies represent statistical outliers that warrant immediate investigation.</p>
                 <p><strong>View Interactive Dashboard:</strong> <a href="https://bk-insidertrades.streamlit.app" style="color: #1f77b4; text-decoration: none; font-weight: bold;">https://bk-insidertrades.streamlit.app</a></p>
             </div>
         """
         
-        # Create summary table
+        # Create summary table for high conviction anomalies
+        if sorted_anomalies:
+            html += """
+                <h2>High Conviction Anomalies (Score ≥ 7.5, Magnitude ≥ $20K)</h2>
+                <table>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Score</th>
+                        <th>Volume</th>
+                        <th>Magnitude</th>
+                        <th>Key Indicators</th>
+                        <th>Insider Pattern</th>
+                    </tr>
+            """
+            
+            for symbol, data in sorted_anomalies:
+                html += self._create_anomaly_row(symbol, data)
+            
+            html += "</table>"
+        
+        
+        # Close HTML
         html += """
-            <h2>Anomaly Summary Table</h2>
-            <table>
-                <tr>
-                    <th>Symbol</th>
-                    <th>Score</th>
-                    <th>Key Indicators</th>
-                    <th>Insider Pattern</th>
-                </tr>
+            <div class="footer">
+                <p>This alert was generated by the Insider Trading Anomaly Detection System.</p>
+                <p>For questions or support, contact the development team.</p>
+            </div>
+        </body>
+        </html>
         """
         
-        for symbol, data in sorted_anomalies:
-            score = data.get('composite_score', 0)
-            details = data.get('details', {})
-            
-            # Extract key indicators
-            call_volume = details.get('call_volume', 0)
-            put_volume = details.get('put_volume', 0)
-            call_baseline = details.get('call_baseline_avg', 1)
-            total_volume = call_volume + put_volume
-            
-            call_multiplier = call_volume / call_baseline if call_baseline > 0 else 0
-            call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
-            
-            # Determine insider pattern
-            if call_percentage >= 80:
-                pattern = "Strong bullish insider activity"
-            elif call_percentage <= 20:
-                pattern = "Strong bearish insider activity"
-            else:
-                pattern = "Mixed directional positioning"
-                
-            open_interest_score = details.get('open_interest_score', 0)
-            open_interest_change = details.get('open_interest_multiplier', 0)
-            
-            key_indicators = f"""
-                • {call_multiplier:.1f}x normal call volume<br/>
-                • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts<br/>
-                • OTM Score: {details.get('otm_score', 0):.1f}/2.0<br/>
-                • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
-            """
-            
-            html += f"""
-                <tr>
-                    <td><strong>{symbol}</strong></td>
-                    <td class="high-score">{score:.1f}/10</td>
-                    <td>{key_indicators}</td>
-                    <td>{pattern}</td>
-                </tr>
-            """
+        return html
+    
+    def _create_anomaly_row(self, symbol: str, data: Dict[str, Any]) -> str:
+        """Create a table row for an anomaly."""
+        score = data.get('composite_score', 0)
+        details = data.get('details', {})
         
-        html += "</table>"
+        # Extract key indicators
+        call_volume = details.get('call_volume', 0)
+        put_volume = details.get('put_volume', 0)
+        call_magnitude = details.get('call_magnitude', 0)
+        put_magnitude = details.get('put_magnitude', 0)
+        total_magnitude = details.get('total_magnitude', 0)
+        call_baseline = details.get('call_baseline_avg', 1)
+        put_baseline = details.get('put_baseline_avg', 1)
+        total_volume = call_volume + put_volume
+        
+        call_multiplier = call_volume / call_baseline if call_baseline > 0 else 0
+        put_multiplier = put_volume / put_baseline if put_baseline > 0 else 0
+        call_percentage = (call_volume / total_volume * 100) if total_volume > 0 else 0
+        
+        # Determine insider pattern and appropriate multiplier
+        if call_percentage >= 80:
+            pattern = "Bullish"
+            volume_text = f"{call_multiplier:.1f}x normal call volume"
+        elif call_percentage <= 20:
+            pattern = "Bearish"
+            volume_text = f"{put_multiplier:.1f}x normal put volume"
+        else:
+            pattern = "Mixed directional positioning"
+            volume_text = f"{call_multiplier:.1f}x call, {put_multiplier:.1f}x put"
+            
+        volume_oi_ratio_score = details.get('volume_oi_ratio_score', 0)
+        call_open_interest = details.get('call_open_interest', 0)
+        put_open_interest = details.get('put_open_interest', 0)
+        
+        # Extract individual scores for detailed breakdown
+        volume_score = details.get('volume_score', 0)
+        otm_score = details.get('otm_score', 0)
+        directional_score = details.get('directional_score', 0)
+        time_score = details.get('time_score', 0)
+        
+        key_indicators = f"""
+            • <strong>Volume Score:</strong> {volume_score:.1f}/3.0 ({volume_text})<br/>
+            • <strong>Volume:OI Score:</strong> {volume_oi_ratio_score:.1f}/2.0 (Call: {call_volume:,} vs {call_open_interest:,} OI)<br/>
+            • <strong>OTM Score:</strong> {otm_score:.1f}/2.0 (Out-of-money concentration)<br/>
+            • <strong>Direction Score:</strong> {directional_score:.1f}/1.0 ({call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts)<br/>
+            • <strong>Time Score:</strong> {time_score:.1f}/2.0 (Near-term expiration focus)<br/>
+            • <strong>Magnitude:</strong> ${total_magnitude:,.0f} total (Call: ${call_magnitude:,.0f}, Put: ${put_magnitude:,.0f})
+        """
+        
+        return f"""
+            <tr>
+                <td><strong>{symbol}</strong></td>
+                <td class="high-score">{score:.1f}/10</td>
+                <td>{total_volume:,}</td>
+                <td>${total_magnitude:,.0f}</td>
+                <td>{key_indicators}</td>
+                <td>{pattern}</td>
+            </tr>
+        """
         
         # Detailed breakdown for each anomaly
         html += "<h2>Detailed Analysis</h2>"
         
+        # Process high conviction anomalies
         for symbol, data in sorted_anomalies:
             score = data.get('composite_score', 0)
             details = data.get('details', {})
             
             volume_score = details.get('volume_score', 0)
-            open_interest_score = details.get('open_interest_score', 0)
-            otm_score = details.get('otm_score', 0)  # Fixed: use 'otm_score' not 'otm_call_score'
+            volume_oi_ratio_score = details.get('volume_oi_ratio_score', 0)
+            otm_score = details.get('otm_score', 0)
             directional_score = details.get('directional_score', 0)
-            time_score = details.get('time_score', 0)  # Fixed: use 'time_score' not 'time_pressure_score'
+            time_score = details.get('time_score', 0)
             
             call_volume = details.get('call_volume', 0)
             put_volume = details.get('put_volume', 0)
+            call_magnitude = details.get('call_magnitude', 0)
+            put_magnitude = details.get('put_magnitude', 0)
+            total_magnitude = details.get('total_magnitude', 0)
             call_baseline = details.get('call_baseline_avg', 1)
             put_baseline = details.get('put_baseline_avg', 1)
-            current_open_interest = details.get('current_open_interest', 0)
-            prior_open_interest = details.get('prior_open_interest', 0)
-            open_interest_multiplier = details.get('open_interest_multiplier', 0)
+            call_open_interest = details.get('call_open_interest', 0)
+            put_open_interest = details.get('put_open_interest', 0)
+            call_volume_oi_ratio = details.get('call_volume_oi_ratio', 0)
+            put_volume_oi_ratio = details.get('put_volume_oi_ratio', 0)
             
             html += f"""
                 <div class="anomaly">
@@ -222,7 +268,7 @@ class EmailNotifier:
                     <div class="indicators">
                         <h4>Score Breakdown:</h4>
                         <div class="indicator">Volume Anomaly: {volume_score:.1f}/3.0 points</div>
-                        <div class="indicator">Open Interest Change: {open_interest_score:.1f}/2.0 points</div>
+                        <div class="indicator">Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0 points</div>
                         <div class="indicator">OTM Call Concentration: {otm_score:.1f}/2.0 points</div>
                         <div class="indicator">Directional Bias: {directional_score:.1f}/1.0 points</div>
                         <div class="indicator">Time Pressure: {time_score:.1f}/2.0 points</div>
@@ -234,20 +280,26 @@ class EmailNotifier:
                         <div class="indicator">Put Volume: {put_volume:,} (vs {put_baseline:.0f} baseline avg)</div>
                         <div class="indicator">Call Multiplier: {(call_volume/call_baseline if call_baseline > 0 else 0):.1f}x normal</div>
                         <div class="indicator">Total Volume: {call_volume + put_volume:,} contracts</div>
-                        <div class="indicator">Open Interest: {current_open_interest:,} (vs {prior_open_interest:,} prior day)</div>
-                        <div class="indicator">Open Interest Change: {open_interest_multiplier:.1f}x</div>
+                        <div class="indicator">Call Open Interest: {call_open_interest:,}</div>
+                        <div class="indicator">Put Open Interest: {put_open_interest:,}</div>
+                        <div class="indicator">Call Volume Magnitude: ${call_magnitude:,.0f}</div>
+                        <div class="indicator">Put Volume Magnitude: ${put_magnitude:,.0f}</div>
+                        <div class="indicator">Total Volume Magnitude: ${total_magnitude:,.0f}</div>
+                        <div class="indicator">Call Volume:OI Ratio: {call_volume_oi_ratio:.3f}</div>
+                        <div class="indicator">Put Volume:OI Ratio: {put_volume_oi_ratio:.3f}</div>
                     </div>
                     
                     <div class="indicators">
                         <h4>Insider Trading Indicators:</h4>
                         <div class="indicator">Statistical Significance: {volume_score:.1f}/3.0 (Z-score analysis)</div>
-                        <div class="indicator">Open Interest Surge: {open_interest_score:.1f}/2.0 (Position building)</div>
+                        <div class="indicator">Volume:OI Ratio Anomaly: {volume_oi_ratio_score:.1f}/2.0 (High trading vs existing positions)</div>
                         <div class="indicator">OTM Call Focus: {otm_score:.1f}/2.0 (Classic insider pattern)</div>
                         <div class="indicator">Directional Conviction: {directional_score:.1f}/1.0 (Call/put bias)</div>
                         <div class="indicator">Timing Urgency: {time_score:.1f}/2.0 (Near-term clustering)</div>
                     </div>
                 </div>
             """
+        
         
         html += f"""
             <div class="footer">
@@ -267,7 +319,7 @@ class EmailNotifier:
         return html
     
     def _send_email(self, subject: str, html_content: str):
-        """Send the email using SMTP to multiple recipients."""
+        """Send the email using SMTP to multiple recipients via BCC."""
         if not self.smtp_user or not self.smtp_pass or not self.to_emails:
             raise ValueError("Missing required email configuration (SENDER_EMAIL, EMAIL_PASSWORD, RECIPIENT_EMAIL)")
         
@@ -275,7 +327,10 @@ class EmailNotifier:
         msg = MimeMultipart('alternative')
         msg['Subject'] = subject
         msg['From'] = self.from_email
-        msg['To'] = ', '.join(self.to_emails)  # Join multiple recipients for display
+        msg['To'] = self.from_email  # Send to self, recipients in BCC
+        
+        # Add BCC recipients
+        msg['Bcc'] = ', '.join(self.to_emails)
         
         # Add HTML content
         html_part = MimeText(html_content, 'html')
@@ -286,14 +341,14 @@ class EmailNotifier:
             # Use SMTP_SSL for port 465
             with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port) as server:
                 server.login(self.smtp_user, self.smtp_pass)
-                server.send_message(msg, to_addrs=self.to_emails)  # Send to all recipients
+                server.send_message(msg, to_addrs=[self.from_email] + self.to_emails)  # Include BCC recipients
         else:
             # Use SMTP with STARTTLS for port 587
             with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
                 if self.use_tls:
                     server.starttls()
                 server.login(self.smtp_user, self.smtp_pass)
-                server.send_message(msg, to_addrs=self.to_emails)  # Send to all recipients
+                server.send_message(msg, to_addrs=[self.from_email] + self.to_emails)  # Include BCC recipients
     
     def test_connection(self) -> bool:
         """Test email configuration and connection."""

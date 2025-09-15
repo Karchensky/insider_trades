@@ -97,18 +97,16 @@ class PolygonOptionContractsScraper:
         conn = db.connect()
         try:
             with conn.cursor() as cur:
-                # Find contracts that exist in daily trading but not in our contracts table
+                # Simple logic: Find symbols where daily_option_snapshot has contracts 
+                # that don't exist in option_contracts
                 cur.execute("""
                     SELECT DISTINCT dos.symbol
                     FROM daily_option_snapshot dos
-                    WHERE dos.date >= CURRENT_DATE - INTERVAL '2 days'  -- Recent trading activity
-                      AND dos.volume > 0  -- Only contracts with actual trading
-                      AND NOT EXISTS (
+                    WHERE NOT EXISTS (
                         SELECT 1 
                         FROM option_contracts oc 
-                        WHERE oc.symbol = dos.symbol 
-                          AND oc.contract_ticker = dos.contract_ticker
-                      )
+                        WHERE oc.contract_ticker = dos.contract_ticker
+                    )
                     ORDER BY dos.symbol
                 """)
                 
@@ -127,9 +125,37 @@ class PolygonOptionContractsScraper:
         finally:
             conn.close()
 
-    def fetch_contracts_for_symbol(self, symbol: str, limit: int = 1000) -> List[Dict]:
-        """Fetch active (non-expired) option contracts for a specific symbol."""
-        logger.info(f"Fetching ACTIVE option contracts for {symbol}...")
+    def fetch_contracts_for_symbol(self, symbol: str, limit: int = 1000, retention_days: int = 30) -> List[Dict]:
+        """Fetch option contracts for a specific symbol, filtered by retention policy.
+        
+        Args:
+            symbol: The underlying symbol
+            limit: Maximum contracts per page
+            retention_days: Only include contracts expiring within this many days from today.
+                           Set to 0 to disable expired contract fetching entirely.
+        """
+        logger.info(f"Fetching option contracts for {symbol} (retention: {retention_days} days)...")
+        
+        # Fetch active contracts (always fetch these)
+        active_contracts = self._fetch_contracts_by_expiry_status(symbol, limit, expired=False)
+        
+        # Fetch expired contracts (if retention filtering is enabled)
+        expired_contracts = []
+        if retention_days > 0:
+            expired_contracts = self._fetch_contracts_by_expiry_status(symbol, limit, expired=True)
+            # Filter expired contracts by retention policy
+            expired_contracts = self._filter_contracts_by_retention(expired_contracts, retention_days)
+        
+        # Combine active and filtered expired contracts
+        all_contracts = active_contracts + expired_contracts
+        
+        logger.info(f"Completed {symbol}: {len(active_contracts)} active + {len(expired_contracts)} expired (within retention) = {len(all_contracts)} total contracts")
+        return all_contracts
+
+    def _fetch_contracts_by_expiry_status(self, symbol: str, limit: int, expired: bool) -> List[Dict]:
+        """Fetch contracts for a symbol with specific expiry status."""
+        expiry_status = "EXPIRED" if expired else "ACTIVE"
+        logger.info(f"Fetching {expiry_status} contracts for {symbol}...")
         
         all_contracts = []
         next_url = None
@@ -144,7 +170,7 @@ class PolygonOptionContractsScraper:
             else:
                 params = {
                     'underlying_ticker': symbol,
-                    'expired': 'false',  # Only get active contracts
+                    'expired': 'true' if expired else 'false',
                     'limit': limit,
                     'order': 'asc',
                     'sort': 'expiration_date'
@@ -157,24 +183,21 @@ class PolygonOptionContractsScraper:
                 else:
                     response = self.session.get(url, params=params)
                 
-                # Track API calls
-                self.api_calls_made += 1
-                
                 response.raise_for_status()
                 data = response.json()
                 
                 if data.get('status') != 'OK':
-                    logger.error(f"API error for {symbol}: {data}")
+                    logger.error(f"API returned non-OK status for {symbol}: {data.get('status')}")
                     break
                 
                 results = data.get('results', [])
                 if not results:
-                    logger.info(f"No contracts found for {symbol}")
+                    logger.info(f"No {expiry_status.lower()} contracts found for {symbol}")
                     break
                 
                 all_contracts.extend(results)
                 self.total_contracts_fetched += len(results)
-                logger.info(f"{symbol}: Page {page}, got {len(results)} contracts (total: {len(all_contracts)})")
+                logger.info(f"{symbol} ({expiry_status}): Page {page}, got {len(results)} contracts (total: {len(all_contracts)})")
                 
                 # Check for next page
                 next_url = data.get('next_url')
@@ -184,20 +207,78 @@ class PolygonOptionContractsScraper:
                 page += 1
                 
             except requests.exceptions.RequestException as e:
-                logger.error(f"Request failed for {symbol}: {e}")
+                logger.error(f"Request failed for {symbol} ({expiry_status}): {e}")
                 break
             except Exception as e:
-                logger.error(f"Unexpected error for {symbol}: {e}")
+                logger.error(f"Unexpected error for {symbol} ({expiry_status}): {e}")
                 break
         
-        logger.info(f"Completed {symbol}: {len(all_contracts)} total contracts")
+        logger.info(f"Completed {symbol} ({expiry_status}): {len(all_contracts)} total contracts")
         return all_contracts
+
+    def _filter_contracts_by_retention(self, contracts: List[Dict], retention_days: int) -> List[Dict]:
+        """Filter contracts based on the minimum date in daily_option_snapshot.
+        
+        Keeps contracts with expiration_date >= MIN(date) from daily_option_snapshot,
+        since these contracts may exist in the snapshot table.
+        """
+        from datetime import datetime
+        from database.core.connection import db
+        
+        # Get the minimum date from daily_option_snapshot
+        try:
+            min_date_rows = db.execute_query("SELECT MIN(date) AS min_date FROM daily_option_snapshot")
+            min_date = min_date_rows[0]['min_date'] if min_date_rows and min_date_rows[0]['min_date'] else None
+            
+            if not min_date:
+                logger.warning("No data found in daily_option_snapshot - keeping all expired contracts")
+                return contracts
+                
+            logger.info(f"Using MIN date from daily_option_snapshot: {min_date}")
+            
+        except Exception as e:
+            logger.error(f"Failed to get MIN date from daily_option_snapshot: {e}")
+            logger.warning("Falling back to retention_days approach")
+            # Fallback to retention_days approach
+            from datetime import timedelta
+            cutoff_date = (datetime.now() - timedelta(days=retention_days)).date()
+            min_date = cutoff_date
+        
+        filtered_contracts = []
+        for contract in contracts:
+            try:
+                exp_date_str = contract.get('expiration_date')
+                if exp_date_str:
+                    exp_date = datetime.strptime(exp_date_str, '%Y-%m-%d').date()
+                    # Keep contracts that expired on or after the minimum date
+                    if exp_date >= min_date:
+                        filtered_contracts.append(contract)
+            except (ValueError, TypeError):
+                # Skip contracts with invalid expiration dates
+                continue
+        
+        logger.info(f"Contract filter: {len(contracts)} expired contracts → {len(filtered_contracts)} with expiration >= {min_date}")
+        return filtered_contracts
     
     def normalize_contract_data(self, contracts: List[Dict]) -> List[Dict]:
         """Normalize contract data for database insertion."""
         normalized = []
         
+        # Deduplicate contracts by contract_ticker (keep first occurrence)
+        seen_tickers = set()
+        unique_contracts = []
+        
         for contract in contracts:
+            ticker = contract.get('ticker', '')
+            if ticker and ticker not in seen_tickers:
+                seen_tickers.add(ticker)
+                unique_contracts.append(contract)
+            elif ticker in seen_tickers:
+                logger.warning(f"Skipping duplicate contract ticker: {ticker}")
+        
+        logger.info(f"Deduplicated {len(contracts)} contracts to {len(unique_contracts)} unique contracts")
+        
+        for contract in unique_contracts:
             try:
                 # Extract required fields with validation
                 normalized_contract = {
@@ -294,6 +375,17 @@ class PolygonOptionContractsScraper:
                     sep='\t'
                 )
                 
+                # Get actual insert count (new records only) BEFORE the upsert
+                cur.execute("""
+                    SELECT COUNT(*) as new_inserts
+                    FROM temp_option_contracts t
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM option_contracts o 
+                        WHERE o.contract_ticker = t.contract_ticker
+                    )
+                """)
+                new_inserts = cur.fetchone()['new_inserts']
+                
                 # Upsert from temp table to main table
                 cur.execute("""
                     INSERT INTO option_contracts (
@@ -320,13 +412,20 @@ class PolygonOptionContractsScraper:
                 """)
                 
                 rows_affected = cur.rowcount
+                
+                
                 # Clean up temp table
                 cur.execute("DROP TABLE IF EXISTS temp_option_contracts")
                 
                 conn.commit()
                 
-                logger.info(f"Successfully upserted {rows_affected} option contracts")
-                return {'success': True, 'rows_affected': rows_affected}
+                logger.info(f"Upsert result: {new_inserts} new contracts inserted, {rows_affected - new_inserts} existing contracts updated")
+                return {
+                    'success': True, 
+                    'rows_affected': rows_affected,
+                    'new_inserts': new_inserts,
+                    'updates': rows_affected - new_inserts
+                }
                 
         except Exception as e:
             logger.error(f"Bulk upsert failed: {e}")
@@ -335,8 +434,14 @@ class PolygonOptionContractsScraper:
         finally:
             conn.close()
     
-    def scrape_all_symbols(self, symbol_limit: Optional[int] = None) -> Dict[str, any]:
-        """Scrape option contracts for all active symbols."""
+    def scrape_all_symbols(self, symbol_limit: Optional[int] = None, retention_days: int = 30) -> Dict[str, any]:
+        """Scrape option contracts for all active symbols.
+        
+        Args:
+            symbol_limit: Maximum number of symbols to process
+            retention_days: Only include contracts expiring within this many days from today.
+                           Set to 0 to disable expired contract fetching entirely.
+        """
         start_time = datetime.now()
         logger.info("Starting option contracts scraping for all symbols...")
         
@@ -355,7 +460,7 @@ class PolygonOptionContractsScraper:
             
             try:
                 # Fetch contracts for this symbol
-                contracts = self.fetch_contracts_for_symbol(symbol)
+                contracts = self.fetch_contracts_for_symbol(symbol, retention_days=retention_days)
                 
                 if contracts:
                     # Normalize data
@@ -416,7 +521,7 @@ class PolygonOptionContractsScraper:
             'contracts_per_api_call': self.total_contracts_fetched / self.api_calls_made if self.api_calls_made > 0 else 0
         }
 
-    def scrape_incremental_smart(self, symbol_limit: Optional[int] = None) -> Dict[str, any]:
+    def scrape_incremental_smart(self, symbol_limit: Optional[int] = None, retention_days: int = 30) -> Dict[str, any]:
         """Smart incremental scraping - only process symbols with new contracts in daily_option_snapshot."""
         start_time = datetime.now()
         logger.info("Starting SMART INCREMENTAL option contracts scraping...")
@@ -453,15 +558,24 @@ class PolygonOptionContractsScraper:
             
             try:
                 # Fetch contracts for this symbol
-                contracts = self.fetch_contracts_for_symbol(symbol)
+                contracts = self.fetch_contracts_for_symbol(symbol, retention_days=retention_days)
                 
                 if contracts:
+                    # Normalize contract data
+                    normalized_contracts = self.normalize_contract_data(contracts)
+                    
                     # Bulk upsert contracts
-                    result = self.bulk_upsert_contracts(contracts)
+                    result = self.bulk_upsert_contracts(normalized_contracts)
                     if result.get('success'):
-                        total_contracts += len(contracts)
-                        successful_symbols += 1
-                        logger.info(f"✓ {symbol}: {len(contracts)} contracts processed")
+                        new_inserts = result.get('new_inserts', 0)
+                        updates = result.get('updates', 0)
+                        
+                        if new_inserts > 0:
+                            total_contracts += len(contracts)
+                            successful_symbols += 1
+                            logger.info(f"✓ {symbol}: {len(contracts)} contracts processed ({new_inserts} new, {updates} updated)")
+                        else:
+                            logger.info(f"✓ {symbol}: {len(contracts)} contracts processed (0 new, {updates} updated) - no new contracts needed")
                     else:
                         failed_symbols.append((symbol, result.get('error', 'Bulk upsert failed')))
                         logger.error(f"✗ {symbol}: {result.get('error', 'Bulk upsert failed')}")

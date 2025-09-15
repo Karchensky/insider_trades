@@ -7,12 +7,12 @@ of options trading patterns against 30-day baselines.
 
 Scoring System (1-10 scale):
 - Volume Anomaly (0-3): High volume z-score analysis vs baseline (only rewards above-average volume)
-- Open Interest Change (0-2): Open interest multiplier vs prior day (≥5.0x = 2.0 points)
+- Volume:Open Interest Ratio (0-2): Volume:OI ratio z-score vs historical baseline (only rewards above-average ratios)
 - OTM Call Concentration (0-2): Short-term out-of-money calls  
 - Directional Bias (0-1): Strong call/put preference
 - Time Pressure (0-2): Near-term expiration clustering
 
-Alert Threshold: Score >= 7.0 (high-conviction only)
+Alert Threshold: Score >= 7.5 (high-conviction only)
 """
 
 import logging
@@ -118,13 +118,15 @@ class InsiderAnomalyDetector:
                         o.greeks_gamma,
                         o.greeks_theta,
                         o.greeks_vega,
+                        COALESCE(oc.shares_per_contract, 100) as shares_per_contract,
                         COALESCE(s.day_close, s.day_vwap, o.underlying_price, 0) as underlying_price,
                         o.as_of_timestamp
                     FROM latest_temp_option o
                     LEFT JOIN latest_temp_stock s ON o.symbol = s.symbol
+                    LEFT JOIN option_contracts oc ON o.contract_ticker = oc.contract_ticker
                     WHERE COALESCE(s.day_close, s.day_vwap, o.underlying_price, 0) > 0
                       AND o.contract_type IN ('call', 'put')
-                      AND o.expiration_date > CURRENT_DATE
+                      AND o.expiration_date >= CURRENT_DATE
                     ORDER BY o.symbol, o.contract_ticker
                 """)
                 
@@ -190,52 +192,32 @@ class InsiderAnomalyDetector:
                     WITH daily_volumes AS (
                         SELECT 
                             dos.date,
-                            dos.symbol,
+                            oc.symbol,
                             oc.contract_type,
                             SUM(dos.volume) as total_volume,
-                            COUNT(*) as total_contracts,
-                            -- IV metrics
-                            SUM(CASE WHEN dos.implied_volatility IS NOT NULL AND dos.implied_volatility > 0 THEN 1 ELSE 0 END) as iv_contracts,
-                            SUM(CASE WHEN dos.implied_volatility IS NOT NULL AND dos.implied_volatility > 0 THEN dos.implied_volatility * dos.volume ELSE 0 END) / 
-                            NULLIF(SUM(CASE WHEN dos.implied_volatility IS NOT NULL AND dos.implied_volatility > 0 THEN dos.volume ELSE 0 END), 0) as weighted_avg_iv,
-                            -- Short-term options (<=21 days from date)
-                            SUM(CASE WHEN oc.expiration_date <= dos.date + INTERVAL '21 days' THEN dos.volume ELSE 0 END) as short_term_volume,
-                            COUNT(CASE WHEN oc.expiration_date <= dos.date + INTERVAL '21 days' THEN 1 END) as short_term_contracts,
-                            -- OTM options using accurate contract metadata
-                            SUM(CASE WHEN oc.contract_type = 'call' AND oc.strike_price > dss.close * 1.05 THEN dos.volume ELSE 0 END) as otm_call_volume,
-                            COUNT(CASE WHEN oc.contract_type = 'call' AND oc.strike_price > dss.close * 1.05 THEN 1 END) as otm_call_contracts,
-                            SUM(CASE WHEN oc.contract_type = 'put' AND oc.strike_price < dss.close * 0.95 THEN dos.volume ELSE 0 END) as otm_put_volume,
-                            COUNT(CASE WHEN oc.contract_type = 'put' AND oc.strike_price < dss.close * 0.95 THEN 1 END) as otm_put_contracts
+                            SUM(dos.open_interest) as total_open_interest,
+                            CASE WHEN SUM(dos.open_interest) > 0 then 1 else 0 end as open_interest_day,
+                            CASE WHEN SUM(dos.open_interest) > 0 
+                                THEN SUM(dos.volume)::DECIMAL / SUM(dos.open_interest) 
+                                ELSE 0 END as daily_volume_oi_ratio
                         FROM daily_option_snapshot dos
-                        INNER JOIN option_contracts oc ON dos.symbol = oc.symbol AND dos.contract_ticker = oc.contract_ticker
-                        LEFT JOIN daily_stock_snapshot dss ON dos.symbol = dss.symbol AND dos.date = dss.date
+                        INNER JOIN option_contracts oc ON dos.contract_ticker = oc.contract_ticker
                         WHERE dos.date BETWEEN %s AND %s
                           AND dos.volume > 0
                           AND oc.contract_type IN ('call', 'put')
-                        GROUP BY dos.date, dos.symbol, oc.contract_type
+                        GROUP BY dos.date, oc.symbol, oc.contract_type
                     )
                     SELECT 
                         symbol,
                         contract_type,
                         COUNT(DISTINCT date) as baseline_days_count,
-                        -- Overall volume metrics
+                        COUNT(DISTINCT CASE WHEN OPEN_INTEREST_DAY  = 1 THEN DATE ELSE NULL end)  as OI_days_count,
+                        -- Volume metrics (used in volume anomaly scoring)
                         SUM(total_volume) / COUNT(DISTINCT date) as avg_daily_volume,
-                        CASE WHEN COUNT(DISTINCT date) > 1 THEN STDDEV(total_volume) ELSE 0 END as stddev_daily_volume,
-                        SUM(total_contracts) / COUNT(DISTINCT date) as avg_daily_contracts,
-                        CASE WHEN COUNT(DISTINCT date) > 1 THEN STDDEV(total_contracts) ELSE 0 END as stddev_daily_contracts,
-                        -- IV metrics
-                        COUNT(DISTINCT CASE WHEN iv_contracts > 0 THEN date END) as baseline_iv_days_count,
-                        SUM(weighted_avg_iv * iv_contracts) / NULLIF(SUM(iv_contracts), 0) as avg_daily_iv,
-                        CASE WHEN COUNT(DISTINCT CASE WHEN iv_contracts > 0 THEN date END) > 1 THEN STDDEV(weighted_avg_iv) ELSE 0 END as stddev_daily_iv,
-                        -- Short-term metrics
-                        SUM(short_term_volume) / COUNT(DISTINCT date) as avg_daily_short_term_volume,
-                        CASE WHEN COUNT(DISTINCT date) > 1 THEN STDDEV(short_term_volume) ELSE 0 END as stddev_daily_short_term_volume,
-                        SUM(short_term_contracts) / COUNT(DISTINCT date) as avg_daily_short_term_contracts,
-                        -- OTM metrics
-                        SUM(otm_call_volume) / COUNT(DISTINCT date) as avg_daily_otm_call_volume,
-                        CASE WHEN COUNT(DISTINCT date) > 1 THEN STDDEV(otm_call_volume) ELSE 0 END as stddev_daily_otm_call_volume,
-                        SUM(otm_put_volume) / COUNT(DISTINCT date) as avg_daily_otm_put_volume,
-                        CASE WHEN COUNT(DISTINCT date) > 1 THEN STDDEV(otm_put_volume) ELSE 0 END as stddev_daily_otm_put_volume
+                        STDDEV(total_volume) as stddev_daily_volume,
+                        -- Volume:OI Ratio metrics (used in volume:OI ratio scoring)
+                        AVG(case when OPEN_INTEREST_DAY = 1 then daily_volume_oi_ratio else null end) as avg_daily_volume_oi_ratio,
+                        STDDEV(case when OPEN_INTEREST_DAY = 1 then daily_volume_oi_ratio else null end) as stddev_daily_volume_oi_ratio
                     FROM daily_volumes
                     WHERE contract_type != 'unknown'
                     GROUP BY symbol, contract_type
@@ -268,27 +250,21 @@ class InsiderAnomalyDetector:
                         'baseline_days_count': data['baseline_days_count'],
                         'avg_daily_volume': float(data['avg_daily_volume']) if data['avg_daily_volume'] else 0,
                         'stddev_daily_volume': float(data['stddev_daily_volume']) if data['stddev_daily_volume'] else 0,
-                        'avg_daily_contracts': float(data['avg_daily_contracts']) if data['avg_daily_contracts'] else 0,
-                        'stddev_daily_contracts': float(data['stddev_daily_contracts']) if data['stddev_daily_contracts'] else 0,
-                        'avg_daily_short_term_volume': float(data['avg_daily_short_term_volume']) if data['avg_daily_short_term_volume'] else 0,
-                        'stddev_daily_short_term_volume': float(data['stddev_daily_short_term_volume']) if data['stddev_daily_short_term_volume'] else 0,
-                        'avg_daily_otm_call_volume': float(data['avg_daily_otm_call_volume']) if data['avg_daily_otm_call_volume'] else 0,
-                        'stddev_daily_otm_call_volume': float(data['stddev_daily_otm_call_volume']) if data['stddev_daily_otm_call_volume'] else 0,
-                        'avg_daily_otm_put_volume': float(data['avg_daily_otm_put_volume']) if data['avg_daily_otm_put_volume'] else 0,
-                        'stddev_daily_otm_put_volume': float(data['stddev_daily_otm_put_volume']) if data['stddev_daily_otm_put_volume'] else 0
+                        'avg_daily_volume_oi_ratio': float(data['avg_daily_volume_oi_ratio']) if data['avg_daily_volume_oi_ratio'] else 0,
+                        'stddev_daily_volume_oi_ratio': float(data['stddev_daily_volume_oi_ratio']) if data['stddev_daily_volume_oi_ratio'] else 0
                     }
                     
-                    iv_stats[key] = {
-                        'symbol': symbol,
-                        'contract_type': contract_type,
-                        'baseline_iv_days_count': data['baseline_iv_days_count'],
-                        'avg_iv': float(data['avg_daily_iv']) if data['avg_daily_iv'] else 0,
-                        'stddev_iv': float(data['stddev_daily_iv']) if data['stddev_daily_iv'] else 0
-                    }
+                    # Note: IV stats removed as they're not used in current scoring system
+                    # iv_stats[key] = {
+                    #     'symbol': symbol,
+                    #     'contract_type': contract_type,
+                    #     'baseline_iv_days_count': data['baseline_iv_days_count'],
+                    #     'avg_iv': float(data['avg_daily_iv']) if data['avg_daily_iv'] else 0,
+                    #     'stddev_iv': float(data['stddev_daily_iv']) if data['stddev_daily_iv'] else 0
+                    # }
                 
                 return {
                     'volume_stats': volume_stats,
-                    'iv_stats': iv_stats,
                     'baseline_period': {
                         'start_date': actual_start_date,
                         'end_date': actual_end_date,
@@ -324,14 +300,37 @@ class InsiderAnomalyDetector:
         
         # Get most recent open interest for all symbols in one query (performance optimization)
         symbols_list = list(symbol_data.keys())
-        prior_open_interest_data = self._get_most_recent_open_interest(symbols_list)
-        logger.info(f"Retrieved most recent open interest data for {len(prior_open_interest_data)} symbols")
         
         for symbol, contracts in symbol_data.items():
             # Calculate symbol-level metrics
             call_volume = int(sum(c['session_volume'] for c in contracts if c['contract_type'] == 'call'))
             put_volume = int(sum(c['session_volume'] for c in contracts if c['contract_type'] == 'put'))
             total_volume = call_volume + put_volume
+            
+            # Calculate call and put open interest separately
+            call_open_interest = int(sum(c.get('open_interest', 0) for c in contracts if c['contract_type'] == 'call'))
+            put_open_interest = int(sum(c.get('open_interest', 0) for c in contracts if c['contract_type'] == 'put'))
+            
+            # Calculate call and put magnitude separately (volume * price * shares_per_contract)
+            # shares_per_contract is already fetched in the main query, so no additional DB lookup needed
+            call_magnitude = 0
+            put_magnitude = 0
+            
+            for c in contracts:
+                volume = c.get('session_volume', 0) or 0
+                price = c.get('session_close', 0) or 0
+                shares_per_contract = c.get('shares_per_contract') or 100  # Default to 100 if None or missing
+                
+                magnitude = volume * price * shares_per_contract
+                
+                if c['contract_type'] == 'call':
+                    call_magnitude += magnitude
+                else:
+                    put_magnitude += magnitude
+            
+            call_magnitude = int(call_magnitude)
+            put_magnitude = int(put_magnitude)
+            total_magnitude = call_magnitude + put_magnitude
             
             # Process all symbols regardless of volume
             
@@ -346,10 +345,9 @@ class InsiderAnomalyDetector:
             
             # Calculate individual test scores
             volume_score = self._calculate_volume_anomaly_score_v2(call_volume, put_volume, call_baseline, put_baseline)
-            prior_open_interest = prior_open_interest_data.get(symbol, 0.0)
-            open_interest_score, open_interest_multiplier, current_open_interest, prior_open_interest_vol = self._calculate_open_interest_score(symbol, contracts, prior_open_interest)
+            volume_oi_ratio_score = self._calculate_volume_oi_ratio_score(call_volume, put_volume, call_open_interest, put_open_interest, call_baseline, put_baseline)
             otm_score = self._calculate_otm_call_score_v2(contracts)
-            directional_score = self._calculate_directional_bias_score_v2(call_volume, put_volume, total_volume)
+            directional_score = self._calculate_directional_bias_score_v2(call_volume, put_volume, total_volume, call_magnitude, put_magnitude, total_magnitude)
             time_pressure_score = self._calculate_time_pressure_score_v2(contracts)
             
             # Calculate additional metrics for enhanced storage
@@ -390,32 +388,44 @@ class InsiderAnomalyDetector:
             short_term_percentage = (short_term_volume / total_volume * 100) if total_volume > 0 else 0
             
             # Composite score (0-10 scale)
-            composite_score = min(volume_score + open_interest_score + otm_score + directional_score + time_pressure_score, 10.0)
+            composite_score = min(volume_score + volume_oi_ratio_score + otm_score + directional_score + time_pressure_score, 10.0)
+            
+            # Round composite score for consistent comparison and storage
+            rounded_composite_score = round(composite_score, 1)
             
             # Store ALL scores in database for historical tracking
             anomaly_data = {
                 'symbol': symbol,
-                'composite_score': round(composite_score, 1),
+                'composite_score': rounded_composite_score,
                 'total_volume': total_volume,  # Add total_volume at top level for email filtering
-                'anomaly_types': ['insider_activity'] if composite_score >= 7.0 else ['low_score_activity'],
+                'total_magnitude': total_magnitude,  # Add total_magnitude for filtering
+                'anomaly_types': ['insider_activity'] if rounded_composite_score >= 7.5 and total_magnitude >= 20000 else ['low_score_activity'],
                 'total_anomalies': 1,
                 'details': {
                     'volume_score': round(volume_score, 1),
-                    'open_interest_score': round(open_interest_score, 1),
+                    'volume_oi_ratio_score': round(volume_oi_ratio_score, 1),
                     'otm_score': round(otm_score, 1),
                     'directional_score': round(directional_score, 1),
                     'time_score': round(time_pressure_score, 1),
                     'call_volume': call_volume,
                     'put_volume': put_volume,
                     'total_volume': total_volume,
+                    'call_magnitude': call_magnitude,
+                    'put_magnitude': put_magnitude,
+                    'total_magnitude': total_magnitude,
+                    'call_open_interest': call_open_interest,
+                    'put_open_interest': put_open_interest,
                     'call_baseline_avg': call_baseline_avg,
                     'put_baseline_avg': put_baseline_avg,
                     'z_score': round(max_z_score, 2),
                     'otm_call_percentage': round(otm_call_percentage, 1),
                     'short_term_percentage': round(short_term_percentage, 1),
-                    'open_interest_multiplier': round(open_interest_multiplier, 2),
-                    'current_open_interest': current_open_interest,
-                    'prior_open_interest': prior_open_interest_vol
+                    'call_volume_oi_ratio': round(call_volume / call_open_interest, 4) if call_open_interest > 0 else 0,
+                    'put_volume_oi_ratio': round(put_volume / put_open_interest, 4) if put_open_interest > 0 else 0,
+                    'call_volume_oi_z_score': round((call_volume / call_open_interest - call_baseline.get('avg_daily_volume_oi_ratio', 0)) / call_baseline.get('stddev_daily_volume_oi_ratio', 1), 3) if call_open_interest > 0 and call_baseline.get('stddev_daily_volume_oi_ratio', 1) > 0 else 0,
+                    'put_volume_oi_z_score': round((put_volume / put_open_interest - put_baseline.get('avg_daily_volume_oi_ratio', 0)) / put_baseline.get('stddev_daily_volume_oi_ratio', 1), 3) if put_open_interest > 0 and put_baseline.get('stddev_daily_volume_oi_ratio', 1) > 0 else 0,
+                    'call_volume_oi_avg': round(call_baseline.get('avg_daily_volume_oi_ratio', 0), 4),
+                    'put_volume_oi_avg': round(put_baseline.get('avg_daily_volume_oi_ratio', 0), 4)
                 },
                 'max_individual_score': composite_score
             }
@@ -423,8 +433,8 @@ class InsiderAnomalyDetector:
             # Collect all anomaly data for bulk processing
             all_anomaly_data.append(anomaly_data)
             
-            # Only flag high-conviction cases (score >= 7.0) for notifications
-            if composite_score >= 7.0:
+            # Only flag high-conviction cases (score >= 7.5 AND magnitude >= $20,000) for notifications
+            if rounded_composite_score >= 7.5 and total_magnitude >= 20000:
                 high_conviction_symbols[symbol] = anomaly_data
         
         # Bulk store all anomaly data
@@ -432,7 +442,7 @@ class InsiderAnomalyDetector:
             stored_count = self._store_anomalies_bulk(all_anomaly_data)
             logger.info(f"Bulk stored {stored_count} anomaly records in database")
         
-        logger.info(f"Analysis complete: {len(high_conviction_symbols)} symbols scored >= 7.0 out of {len(symbol_data)} analyzed. All scores stored in database.")
+        logger.info(f"Analysis complete: {len(high_conviction_symbols)} symbols scored >= 7.5 out of {len(symbol_data)} analyzed. All scores stored in database.")
         return high_conviction_symbols
     
     def _calculate_volume_anomaly_score_v2(self, call_volume: int, put_volume: int, call_baseline: Dict, put_baseline: Dict) -> float:
@@ -457,85 +467,57 @@ class InsiderAnomalyDetector:
         # Take the highest anomaly (either call or put direction)
         return max(call_score, put_score)
     
-    def _get_most_recent_open_interest(self, symbols: List[str]) -> Dict[str, float]:
-        """
-        Get most recent trading day's open interest for all symbols in a single query.
-        Handles weekends, holidays, and data gaps by finding the most recent available data.
-        
-        Returns:
-            Dict mapping symbol -> most recent open interest
-        """
-        if not symbols:
-            return {}
-        
-        conn = db.connect()
-        try:
-            with conn.cursor() as cur:
-                # Get most recent trading day's open interest for all symbols
-                # This handles weekends, holidays, and any gaps in data
-                cur.execute("""
-                    WITH symbol_latest_dates AS (
-                        SELECT symbol, MAX(date) as latest_symbol_date
-                        FROM daily_option_snapshot 
-                        WHERE symbol = ANY(%s) 
-                          AND date < %s
-                        GROUP BY symbol
-                    )
-                    SELECT dos.symbol, SUM(dos.open_interest) as total_open_interest
-                    FROM daily_option_snapshot dos
-                    JOIN symbol_latest_dates sld ON dos.symbol = sld.symbol AND dos.date = sld.latest_symbol_date
-                    GROUP BY dos.symbol
-                """, (symbols, self.current_date))
-                
-                results = cur.fetchall()
-                logger.info(f"Open interest query returned {len(results)} symbols")
-                return {row['symbol']: float(row['total_open_interest'] or 0) for row in results}
-                
-        except Exception as e:
-            logger.warning(f"Failed to get prior day open interest data: {e}")
-            return {}
-        finally:
-            conn.close()
     
-    def _calculate_open_interest_score(self, symbol: str, contracts: List[Dict], prior_open_interest: float) -> tuple[float, float, int, int]:
+    def _calculate_volume_oi_ratio_score(self, call_volume: int, put_volume: int, 
+                                        call_open_interest: int, put_open_interest: int,
+                                        call_baseline: Dict, put_baseline: Dict) -> float:
         """
-        Calculate open interest change score (0-2 points).
+        Calculate volume:open interest ratio anomaly score (0-2 points).
+        Uses z-score analysis vs historical baseline.
         
         Args:
-            symbol: Stock symbol
-            contracts: List of contract data
-            prior_open_interest: Prior day's open interest (from bulk query)
+            call_volume: Current day call volume
+            put_volume: Current day put volume  
+            call_open_interest: Current day call open interest
+            put_open_interest: Current day put open interest
+            call_baseline: Call baseline statistics
+            put_baseline: Put baseline statistics
         
         Returns:
-            tuple: (score, multiplier, current_open_interest, prior_open_interest)
+            float: Score (0-2 points)
         """
-        # Calculate current day's total open interest
-        current_open_interest = sum(int(c.get('open_interest', 0)) for c in contracts)
+        call_score = 0.0
+        put_score = 0.0
         
-        if current_open_interest == 0 or prior_open_interest == 0:
-            return 0.0, 0.0, current_open_interest, int(prior_open_interest)
+        # Call volume:OI ratio z-score (only reward HIGH ratios)
+        if call_open_interest > 0:
+            call_ratio = call_volume / call_open_interest
+            call_avg_ratio = float(call_baseline.get('avg_daily_volume_oi_ratio', 0))
+            call_std_ratio = float(call_baseline.get('stddev_daily_volume_oi_ratio', 1))
+            
+            if call_std_ratio > 0 and call_avg_ratio > 0 and call_ratio > call_avg_ratio:
+                call_z = (call_ratio - call_avg_ratio) / call_std_ratio
+                call_score = min(call_z, 4.0) / 2.0  # Max 2.0 points at 4 standard deviations
         
-        # Calculate multiplier
-        multiplier = current_open_interest / prior_open_interest
+        # Put volume:OI ratio z-score (only reward HIGH ratios)
+        if put_open_interest > 0:
+            put_ratio = put_volume / put_open_interest
+            put_avg_ratio = float(put_baseline.get('avg_daily_volume_oi_ratio', 0))
+            put_std_ratio = float(put_baseline.get('stddev_daily_volume_oi_ratio', 1))
+            
+            if put_std_ratio > 0 and put_avg_ratio > 0 and put_ratio > put_avg_ratio:
+                put_z = (put_ratio - put_avg_ratio) / put_std_ratio
+                put_score = min(put_z, 4.0) / 2.0  # Max 2.0 points at 4 standard deviations
         
-        # Score based on multiplier (≥5.0x = 2.0 points)
-        if multiplier >= 5.0:
-            score = 2.0
-        elif multiplier >= 3.0:
-            score = 1.5
-        elif multiplier >= 2.0:
-            score = 1.0
-        elif multiplier >= 1.5:
-            score = 0.5
-        else:
-            score = 0.0
-        
-        return score, multiplier, current_open_interest, int(prior_open_interest)
+        # Take the highest anomaly (either call or put direction)
+        return max(call_score, put_score)
     
     def _calculate_otm_call_score_v2(self, contracts: List[Dict]) -> float:
-        """Calculate out-of-the-money call concentration score (0-2 points)."""
+        """Calculate out-of-the-money options concentration score (0-2 points) - includes both calls and puts."""
         call_contracts = [c for c in contracts if c['contract_type'] == 'call']
-        if not call_contracts:
+        put_contracts = [c for c in contracts if c['contract_type'] == 'put']
+        
+        if not call_contracts and not put_contracts:
             return 0.0
         
         # Get underlying price
@@ -548,13 +530,19 @@ class InsiderAnomalyDetector:
         if underlying_price == 0:
             return 0.0
         
-        # Calculate OTM metrics
+        # Calculate OTM call metrics
         otm_call_volume = 0
         total_call_volume = 0
-        short_term_otm_volume = 0
+        short_term_otm_call_volume = 0
+        
+        # Calculate OTM put metrics
+        otm_put_volume = 0
+        total_put_volume = 0
+        short_term_otm_put_volume = 0
         
         today = date.today()
         
+        # Process call contracts
         for contract in call_contracts:
             volume = contract['session_volume']
             strike = float(contract['strike_price']) if contract['strike_price'] else 0
@@ -572,36 +560,84 @@ class InsiderAnomalyDetector:
                 
                 days_to_exp = (exp_date - today).days
                 if days_to_exp <= 21:  # 3 weeks or less
-                    short_term_otm_volume += volume
+                    short_term_otm_call_volume += volume
         
-        if total_call_volume == 0:
-            return 0.0
+        # Process put contracts
+        for contract in put_contracts:
+            volume = contract['session_volume']
+            strike = float(contract['strike_price']) if contract['strike_price'] else 0
+            exp_date = contract['expiration_date']
+            
+            total_put_volume += volume
+            
+            # OTM puts (strike < underlying * 0.95)
+            if float(strike) < float(underlying_price) * 0.95:
+                otm_put_volume += volume
+                
+                # Short-term OTM puts (highest conviction)
+                if isinstance(exp_date, str):
+                    exp_date = datetime.strptime(exp_date, '%Y-%m-%d').date()
+                
+                days_to_exp = (exp_date - today).days
+                if days_to_exp <= 21:  # 3 weeks or less
+                    short_term_otm_put_volume += volume
         
-        otm_ratio = float(otm_call_volume) / float(total_call_volume)
-        short_term_ratio = float(short_term_otm_volume) / float(total_call_volume)
+        # Calculate call score
+        call_score = 0.0
+        if total_call_volume > 0:
+            otm_call_ratio = float(otm_call_volume) / float(total_call_volume)
+            short_term_call_ratio = float(short_term_otm_call_volume) / float(total_call_volume)
+            call_score = (otm_call_ratio * 1.0) + (short_term_call_ratio * 1.0)
         
-        # Scoring: Heavy weight on short-term OTM calls
-        score = (otm_ratio * 1.0) + (short_term_ratio * 1.0)  # Max 2.0
-        return min(score, 2.0)
-    
-    def _calculate_directional_bias_score_v2(self, call_volume: int, put_volume: int, total_volume: int) -> float:
-        """Calculate directional bias score (0-1 points)."""
-        if total_volume == 0:
-            return 0.0
+        # Calculate put score
+        put_score = 0.0
+        if total_put_volume > 0:
+            otm_put_ratio = float(otm_put_volume) / float(total_put_volume)
+            short_term_put_ratio = float(short_term_otm_put_volume) / float(total_put_volume)
+            put_score = (otm_put_ratio * 1.0) + (short_term_put_ratio * 1.0)
         
-        call_ratio = call_volume / total_volume
-        
-        # Strong call bias (potential bullish insider info)
-        if call_ratio > 0.8:  # 80%+ calls
-            return 1.0
-        elif call_ratio > 0.7:  # 70%+ calls
-            return 0.8
-        elif call_ratio > 0.6:  # 60%+ calls
-            return 0.6
-        elif call_ratio < 0.2:  # 80%+ puts (bearish insider info)
-            return 0.8
+        # Use the score from the direction with the most volume
+        if total_call_volume > total_put_volume:
+            score = call_score
+        elif total_put_volume > total_call_volume:
+            score = put_score
         else:
+            # If volumes are equal, use the maximum score
+            score = max(call_score, put_score)
+        
+        return min(score, 2.0)  # Cap at 2.0
+    
+    def _calculate_directional_bias_score_v2(self, call_volume: int, put_volume: int, total_volume: int, 
+                                            call_magnitude: float, put_magnitude: float, total_magnitude: float) -> float:
+        """Calculate directional bias score (0-1 points) using both volume and magnitude with directional consideration."""
+        if total_volume == 0 or total_magnitude == 0:
             return 0.0
+        
+        # Calculate volume-based directional bias
+        call_volume_ratio = call_volume / total_volume
+        volume_distance_from_50_50 = abs(call_volume_ratio - 0.5)
+        volume_score = volume_distance_from_50_50 * 2  # Max 1.0 for 100% calls or puts
+        
+        # Calculate magnitude-based directional bias
+        call_magnitude_ratio = call_magnitude / total_magnitude
+        magnitude_distance_from_50_50 = abs(call_magnitude_ratio - 0.5)
+        magnitude_score = magnitude_distance_from_50_50 * 2  # Max 1.0 for 100% calls or puts
+        
+        # Determine direction for each component
+        volume_call_direction = 1 if call_volume_ratio > 0.5 else -1  # 1 for call bias, -1 for put bias
+        magnitude_call_direction = 1 if call_magnitude_ratio > 0.5 else -1  # 1 for call bias, -1 for put bias
+        
+        # Calculate directional scores (0 to 0.5 each)
+        volume_directional_score = volume_score * 0.5 * volume_call_direction
+        magnitude_directional_score = magnitude_score * 0.5 * magnitude_call_direction
+        
+        # Combine scores - they can counteract each other if directions differ
+        total_directional_score = volume_directional_score + magnitude_directional_score
+        
+        # Convert back to absolute score (0 to 1.0)
+        final_score = abs(total_directional_score)
+        
+        return min(final_score, 1.0)  # Cap at 1.0
     
     def _calculate_time_pressure_score_v2(self, contracts: List[Dict]) -> float:
         """Calculate time pressure score based on expiration clustering (0-2 points)."""
@@ -623,7 +659,8 @@ class InsiderAnomalyDetector:
             
             if days_to_exp <= 7:  # This week
                 exp_volumes['this_week'] = exp_volumes.get('this_week', 0) + volume
-            elif days_to_exp <= 21:  # Next 3 weeks
+            
+            if days_to_exp <= 21:  # Short-term (includes this week)
                 exp_volumes['short_term'] = exp_volumes.get('short_term', 0) + volume
         
         if total_volume == 0:
@@ -680,18 +717,19 @@ class InsiderAnomalyDetector:
                     if details.get('short_term_percentage', 0) > 70:
                         pattern_description += ", Short-term focus"
                     
-                    # Add open interest information
-                    open_interest_multiplier = details.get('open_interest_multiplier', 0)
-                    if open_interest_multiplier >= 5.0:
-                        pattern_description += ", Massive OI surge"
-                    elif open_interest_multiplier >= 3.0:
-                        pattern_description += ", Major OI increase"
-                    elif open_interest_multiplier >= 2.0:
-                        pattern_description += ", Significant OI growth"
+                    # Add volume:OI ratio information
+                    volume_oi_ratio_score = details.get('volume_oi_ratio_score', 0)
+                    if volume_oi_ratio_score >= 1.5:
+                        pattern_description += ", High volume:OI ratio"
+                    elif volume_oi_ratio_score >= 1.0:
+                        pattern_description += ", Elevated volume:OI ratio"
                     
                     # Calculate call/put ratio (cap at 9999.9999 to avoid database overflow)
-                    call_put_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
-                    call_put_ratio = min(call_put_ratio, 9999.9999) # sets the min value to 9999.9999
+                    original_ratio = call_volume / put_volume if put_volume > 0 else 9999.9999
+                    call_put_ratio = min(original_ratio, 9999.9999)
+                    if original_ratio > 9999.9999:
+                        logger.warning(f"Capped call/put ratio for {anomaly_data['symbol']}: {original_ratio:.2f} -> 9999.9999")
+                    
                     
                     # Prepare row data
                     row_data = (
@@ -699,13 +737,14 @@ class InsiderAnomalyDetector:
                         anomaly_data['symbol'],
                         anomaly_data['composite_score'],
                         details.get('volume_score', 0),
-                        details.get('open_interest_score', 0),
+                        details.get('volume_oi_ratio_score', 0),
                         details.get('otm_score', 0),
                         details.get('directional_score', 0),
                         details.get('time_score', 0),
                         call_volume,
                         put_volume,
                         total_volume,
+                        details.get('call_open_interest', 0) + details.get('put_open_interest', 0),  # total open_interest
                         call_baseline_avg,
                         put_baseline_avg,
                         call_multiplier,
@@ -716,9 +755,17 @@ class InsiderAnomalyDetector:
                         details.get('otm_call_percentage', 0),
                         details.get('short_term_percentage', 0),
                         call_put_ratio,
-                        details.get('open_interest_multiplier', 0),
-                        details.get('current_open_interest', 0),
-                        details.get('prior_open_interest', 0),
+                        details.get('call_open_interest', 0),
+                        details.get('put_open_interest', 0),
+                        details.get('call_volume_oi_ratio', 0),
+                        details.get('put_volume_oi_ratio', 0),
+                        details.get('call_volume_oi_z_score', 0),
+                        details.get('put_volume_oi_z_score', 0),
+                        details.get('call_volume_oi_avg', 0),
+                        details.get('put_volume_oi_avg', 0),
+                        details.get('call_magnitude', 0),  # call_magnitude
+                        details.get('put_magnitude', 0),  # put_magnitude
+                        details.get('total_magnitude', 0),  # total_magnitude
                         datetime.now(self.est_tz)
                     )
                     bulk_data.append(row_data)
@@ -728,24 +775,28 @@ class InsiderAnomalyDetector:
                 
                 insert_query = """
                     INSERT INTO daily_anomaly_snapshot (
-                        event_date, symbol, total_score, volume_score, open_interest_score, otm_score, 
+                        event_date, symbol, total_score, volume_score, volume_oi_ratio_score, otm_score, 
                         directional_score, time_score, call_volume, put_volume, 
-                        total_volume, call_baseline_avg, put_baseline_avg, 
+                        total_volume, open_interest, call_baseline_avg, put_baseline_avg, 
                         call_multiplier, put_multiplier, direction, pattern_description,
                         z_score, otm_call_percentage, short_term_percentage, call_put_ratio,
-                        open_interest_change, open_interest, prior_open_interest, as_of_timestamp
+                        call_open_interest, put_open_interest, call_volume_oi_ratio, put_volume_oi_ratio,
+                        call_volume_oi_z_score, put_volume_oi_z_score, call_volume_oi_avg, put_volume_oi_avg,
+                        call_magnitude, put_magnitude, total_magnitude,
+                        as_of_timestamp
                     ) VALUES %s
                     ON CONFLICT (event_date, symbol)
                     DO UPDATE SET
                         total_score = EXCLUDED.total_score,
                         volume_score = EXCLUDED.volume_score,
-                        open_interest_score = EXCLUDED.open_interest_score,
+                        volume_oi_ratio_score = EXCLUDED.volume_oi_ratio_score,
                         otm_score = EXCLUDED.otm_score,
                         directional_score = EXCLUDED.directional_score,
                         time_score = EXCLUDED.time_score,
                         call_volume = EXCLUDED.call_volume,
                         put_volume = EXCLUDED.put_volume,
                         total_volume = EXCLUDED.total_volume,
+                        open_interest = EXCLUDED.open_interest,
                         call_baseline_avg = EXCLUDED.call_baseline_avg,
                         put_baseline_avg = EXCLUDED.put_baseline_avg,
                         call_multiplier = EXCLUDED.call_multiplier,
@@ -756,9 +807,17 @@ class InsiderAnomalyDetector:
                         otm_call_percentage = EXCLUDED.otm_call_percentage,
                         short_term_percentage = EXCLUDED.short_term_percentage,
                         call_put_ratio = EXCLUDED.call_put_ratio,
-                        open_interest_change = EXCLUDED.open_interest_change,
-                        open_interest = EXCLUDED.open_interest,
-                        prior_open_interest = EXCLUDED.prior_open_interest,
+                        call_open_interest = EXCLUDED.call_open_interest,
+                        put_open_interest = EXCLUDED.put_open_interest,
+                        call_volume_oi_ratio = EXCLUDED.call_volume_oi_ratio,
+                        put_volume_oi_ratio = EXCLUDED.put_volume_oi_ratio,
+                        call_volume_oi_z_score = EXCLUDED.call_volume_oi_z_score,
+                        put_volume_oi_z_score = EXCLUDED.put_volume_oi_z_score,
+                        call_volume_oi_avg = EXCLUDED.call_volume_oi_avg,
+                        put_volume_oi_avg = EXCLUDED.put_volume_oi_avg,
+                        call_magnitude = EXCLUDED.call_magnitude,
+                        put_magnitude = EXCLUDED.put_magnitude,
+                        total_magnitude = EXCLUDED.total_magnitude,
                         as_of_timestamp = EXCLUDED.as_of_timestamp,
                         updated_at = CURRENT_TIMESTAMP
                 """
