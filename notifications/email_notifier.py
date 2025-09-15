@@ -27,7 +27,7 @@ class EmailNotifier:
         self.use_ssl = self.smtp_port == 465  # Use SSL for port 465
         self.from_email = os.getenv('SENDER_EMAIL', self.smtp_user)
         self.to_emails = self._parse_recipient_emails(os.getenv('RECIPIENT_EMAIL', ''))
-        self.min_score = float(os.getenv('ANOMALY_ALERT_MIN_SCORE', '7.0'))
+        self.min_score = float(os.getenv('ANOMALY_ALERT_MIN_SCORE', '7.5'))
         self.enabled = os.getenv('ANOMALY_EMAIL_ENABLED', 'true').lower() == 'true'
     
     def _parse_recipient_emails(self, recipient_string: str) -> List[str]:
@@ -230,14 +230,15 @@ class EmailNotifier:
             pattern = "Mixed directional positioning"
             volume_text = f"{call_multiplier:.1f}x call, {put_multiplier:.1f}x put"
             
-        open_interest_score = details.get('open_interest_score', 0)
-        open_interest_change = details.get('open_interest_multiplier', 0)
+        volume_oi_ratio_score = details.get('volume_oi_ratio_score', 0)
+        call_open_interest = details.get('call_open_interest', 0)
+        put_open_interest = details.get('put_open_interest', 0)
         
         key_indicators = f"""
             • {volume_text}<br/>
             • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts<br/>
             • OTM Score: {details.get('otm_score', 0):.1f}/2.0<br/>
-            • Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
+            • Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0 (Call OI: {call_open_interest:,}, Put OI: {put_open_interest:,})
         """
         
         return f"""
@@ -259,18 +260,19 @@ class EmailNotifier:
             details = data.get('details', {})
             
             volume_score = details.get('volume_score', 0)
-            open_interest_score = details.get('open_interest_score', 0)
-            otm_score = details.get('otm_score', 0)  # Fixed: use 'otm_score' not 'otm_call_score'
+            volume_oi_ratio_score = details.get('volume_oi_ratio_score', 0)
+            otm_score = details.get('otm_score', 0)
             directional_score = details.get('directional_score', 0)
-            time_score = details.get('time_score', 0)  # Fixed: use 'time_score' not 'time_pressure_score'
+            time_score = details.get('time_score', 0)
             
             call_volume = details.get('call_volume', 0)
             put_volume = details.get('put_volume', 0)
             call_baseline = details.get('call_baseline_avg', 1)
             put_baseline = details.get('put_baseline_avg', 1)
-            current_open_interest = details.get('current_open_interest', 0)
-            prior_open_interest = details.get('prior_open_interest', 0)
-            open_interest_multiplier = details.get('open_interest_multiplier', 0)
+            call_open_interest = details.get('call_open_interest', 0)
+            put_open_interest = details.get('put_open_interest', 0)
+            call_volume_oi_ratio = details.get('call_volume_oi_ratio', 0)
+            put_volume_oi_ratio = details.get('put_volume_oi_ratio', 0)
             
             html += f"""
                 <div class="anomaly">
@@ -279,7 +281,7 @@ class EmailNotifier:
                     <div class="indicators">
                         <h4>Score Breakdown:</h4>
                         <div class="indicator">Volume Anomaly: {volume_score:.1f}/3.0 points</div>
-                        <div class="indicator">Open Interest Change: {open_interest_score:.1f}/2.0 points</div>
+                        <div class="indicator">Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0 points</div>
                         <div class="indicator">OTM Call Concentration: {otm_score:.1f}/2.0 points</div>
                         <div class="indicator">Directional Bias: {directional_score:.1f}/1.0 points</div>
                         <div class="indicator">Time Pressure: {time_score:.1f}/2.0 points</div>
@@ -291,14 +293,16 @@ class EmailNotifier:
                         <div class="indicator">Put Volume: {put_volume:,} (vs {put_baseline:.0f} baseline avg)</div>
                         <div class="indicator">Call Multiplier: {(call_volume/call_baseline if call_baseline > 0 else 0):.1f}x normal</div>
                         <div class="indicator">Total Volume: {call_volume + put_volume:,} contracts</div>
-                        <div class="indicator">Open Interest: {current_open_interest:,} (vs {prior_open_interest:,} prior day)</div>
-                        <div class="indicator">Open Interest Change: {open_interest_multiplier:.1f}x</div>
+                        <div class="indicator">Call Open Interest: {call_open_interest:,}</div>
+                        <div class="indicator">Put Open Interest: {put_open_interest:,}</div>
+                        <div class="indicator">Call Volume:OI Ratio: {call_volume_oi_ratio:.3f}</div>
+                        <div class="indicator">Put Volume:OI Ratio: {put_volume_oi_ratio:.3f}</div>
                     </div>
                     
                     <div class="indicators">
                         <h4>Insider Trading Indicators:</h4>
                         <div class="indicator">Statistical Significance: {volume_score:.1f}/3.0 (Z-score analysis)</div>
-                        <div class="indicator">Open Interest Surge: {open_interest_score:.1f}/2.0 (Position building)</div>
+                        <div class="indicator">Volume:OI Ratio Anomaly: {volume_oi_ratio_score:.1f}/2.0 (High trading vs existing positions)</div>
                         <div class="indicator">OTM Call Focus: {otm_score:.1f}/2.0 (Classic insider pattern)</div>
                         <div class="indicator">Directional Conviction: {directional_score:.1f}/1.0 (Call/put bias)</div>
                         <div class="indicator">Timing Urgency: {time_score:.1f}/2.0 (Near-term clustering)</div>
@@ -312,18 +316,10 @@ class EmailNotifier:
             details = data.get('details', {})
             
             volume_score = details.get('volume_score', 0)
-            open_interest_score = details.get('open_interest_score', 0)
+            volume_oi_ratio_score = details.get('volume_oi_ratio_score', 0)
             otm_score = details.get('otm_score', 0)
             directional_score = details.get('directional_score', 0)
             time_score = details.get('time_score', 0)
-            
-            call_volume = details.get('call_volume', 0)
-            put_volume = details.get('put_volume', 0)
-            call_baseline = details.get('call_baseline_avg', 1)
-            put_baseline = details.get('put_baseline_avg', 1)
-            current_open_interest = details.get('current_open_interest', 0)
-            prior_open_interest = details.get('prior_open_interest', 0)
-            open_interest_multiplier = details.get('open_interest_multiplier', 0)
             
             html += f"""
                 <div class="anomaly low-volume">
@@ -332,7 +328,7 @@ class EmailNotifier:
                     <div class="indicators">
                         <h4>Insider Trading Indicators:</h4>
                         <div class="indicator">Statistical Significance: {volume_score:.1f}/3.0 (Z-score analysis)</div>
-                        <div class="indicator">Open Interest Surge: {open_interest_score:.1f}/2.0 (Position building)</div>
+                        <div class="indicator">Volume:OI Ratio Anomaly: {volume_oi_ratio_score:.1f}/2.0 (High trading vs existing positions)</div>
                         <div class="indicator">OTM Call Focus: {otm_score:.1f}/2.0 (Classic insider pattern)</div>
                         <div class="indicator">Directional Conviction: {directional_score:.1f}/1.0 (Call/put bias)</div>
                         <div class="indicator">Timing Urgency: {time_score:.1f}/2.0 (Near-term clustering)</div>

@@ -75,7 +75,7 @@ def get_current_anomalies() -> pd.DataFrame:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         # First check if we have any data
-        cur.execute("SELECT COUNT(*) as count FROM daily_anomaly_snapshot WHERE total_score >= 7.0")
+        cur.execute("SELECT COUNT(*) as count FROM daily_anomaly_snapshot WHERE total_score >= 7.5")
         count = cur.fetchone()['count']
         
         if count == 0:
@@ -86,7 +86,7 @@ def get_current_anomalies() -> pd.DataFrame:
                 symbol,
                 total_score,
                 volume_score,
-                open_interest_score,
+                volume_oi_ratio_score,
                 otm_score,
                 directional_score,
                 time_score,
@@ -103,13 +103,11 @@ def get_current_anomalies() -> pd.DataFrame:
                 otm_call_percentage,
                 short_term_percentage,
                 call_put_ratio,
-                open_interest_change,
                 as_of_timestamp,
                 event_date,
-                open_interest,
-                prior_open_interest
+                open_interest
             FROM daily_anomaly_snapshot
-            WHERE total_score >= 7.0
+            WHERE total_score >= 7.5
             ORDER BY total_score DESC, as_of_timestamp DESC
         """
         
@@ -176,7 +174,7 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
                 COUNT(*) as contract_count,
                 AVG(dos.implied_volatility) as avg_iv
             FROM daily_option_snapshot dos
-            INNER JOIN option_contracts oc dos.contract_ticker = oc.contract_ticker
+            INNER JOIN option_contracts oc on dos.contract_ticker = oc.contract_ticker
             WHERE oc.symbol = %s
               AND dos.date >= CURRENT_DATE - INTERVAL %s
             GROUP BY dos.date, oc.contract_type
@@ -257,7 +255,7 @@ def get_anomaly_timeline(days: int = 7) -> pd.DataFrame:
                 ARRAY_AGG(symbol ORDER BY total_score DESC) as symbols
             FROM daily_anomaly_snapshot
             WHERE event_date >= CURRENT_DATE - INTERVAL %s
-              AND total_score >= 7.0
+              AND total_score >= 7.5
             GROUP BY event_date
             ORDER BY event_date DESC
         """
@@ -341,14 +339,13 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
                 # Format key indicators using new data structure
                 z_score = safe_numeric(row.get('z_score', 0))
                 total_score = safe_numeric(row.get('total_score', 0))
-                open_interest_score = safe_numeric(row.get('open_interest_score', 0))
-                open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                volume_oi_ratio_score = safe_numeric(row.get('volume_oi_ratio_score', 0))
                 short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
                 
                 key_indicators = f"""• {volume_text}
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/2.0
-• Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
+• Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0
 • Time Sensitivity: {short_term_percentage:.0f}% short-term"""
                 
                 # Handle timestamp safely
@@ -415,14 +412,13 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
                 # Format key indicators using new data structure
                 z_score = safe_numeric(row.get('z_score', 0))
                 total_score = safe_numeric(row.get('total_score', 0))
-                open_interest_score = safe_numeric(row.get('open_interest_score', 0))
-                open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                volume_oi_ratio_score = safe_numeric(row.get('volume_oi_ratio_score', 0))
                 short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
                 
                 key_indicators = f"""• {volume_text}
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/2.0
-• Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
+• Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0
 • Time Sensitivity: {short_term_percentage:.0f}% short-term"""
                 
                 # Handle timestamp safely
@@ -550,14 +546,13 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                     # Format key indicators using new data structure
                     z_score = safe_numeric(row.get('z_score', 0))
                     total_score = safe_numeric(row.get('total_score', 0))
-                    open_interest_score = safe_numeric(row.get('open_interest_score', 0))
-                    open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                    volume_oi_ratio_score = safe_numeric(row.get('volume_oi_ratio_score', 0))
                     short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
                     
                     key_indicators = f"""• {volume_text}
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/2.0
-• Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
+• Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0
 • Time Sensitivity: {short_term_percentage:.0f}% short-term"""
                     
                     # Handle timestamp safely
@@ -654,14 +649,13 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                     # Format key indicators using new data structure
                     z_score = safe_numeric(row.get('z_score', 0))
                     total_score = safe_numeric(row.get('total_score', 0))
-                    open_interest_score = safe_numeric(row.get('open_interest_score', 0))
-                    open_interest_change = safe_numeric(row.get('open_interest_change', 0))
+                    volume_oi_ratio_score = safe_numeric(row.get('volume_oi_ratio_score', 0))
                     short_term_percentage = safe_numeric(row.get('short_term_percentage', 0))
                     
                     key_indicators = f"""• {volume_text}
 • {call_percentage:.0f}% calls vs {100-call_percentage:.0f}% puts
 • OTM Score: {otm_score:.1f}/2.0
-• Open Interest: {open_interest_change:.1f}x ({open_interest_score:.1f}/2.0)
+• Volume:OI Ratio: {volume_oi_ratio_score:.1f}/2.0
 • Time Sensitivity: {short_term_percentage:.0f}% short-term"""
                     
                     # Handle timestamp safely
@@ -753,9 +747,9 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict, selected_date: date 
     
     with col2:
         st.metric(
-            "Open Interest Score", 
-            f"{details.get('open_interest_score', 0):.1f}/2.0",
-            help="Open interest change vs prior day"
+            "Volume:OI Ratio Score", 
+            f"{details.get('volume_oi_ratio_score', 0):.1f}/2.0",
+            help="Volume to open interest ratio anomaly vs historical baseline"
         )
     
     with col3:
@@ -787,7 +781,6 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict, selected_date: date 
     call_baseline = details.get('call_baseline_avg', 1)
     put_baseline = details.get('put_baseline_avg', 1)
     current_open_interest = details.get('current_open_interest', 0)
-    prior_open_interest = details.get('prior_open_interest', 0)
     open_interest_multiplier = details.get('open_interest_multiplier', 0)
     
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -826,7 +819,7 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict, selected_date: date 
             "Open Interest",
             f"{current_open_interest:,}",
             delta=f"{open_interest_multiplier:.1f}x vs prior day",
-            help=f"Current: {current_open_interest:,} vs Prior: {prior_open_interest:,}"
+            help=f"Current open interest: {current_open_interest:,}"
         )
     
     # Charts
@@ -964,7 +957,7 @@ def get_performance_matrix_data() -> pd.DataFrame:
                 INNER JOIN daily_stock_snapshot b
                     ON a.symbol = b.symbol
                     AND a.event_date = b.date
-                WHERE a.total_score >= 7.0
+                WHERE a.total_score >= 7.5
                 ORDER BY a.symbol, a.event_date
             )
             SELECT 
@@ -1708,7 +1701,7 @@ def get_consolidated_symbol_data(symbol: str, target_date: date = None) -> Dict[
 
 @st.cache_data(ttl=180)  # Cache for 3 minutes
 def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, Any]:
-    """Get anomaly data for a symbol even if below 7.0 threshold."""
+    """Get anomaly data for a symbol even if below 7.5 threshold."""
     conn = db.connect()
     try:
         import psycopg2.extras
@@ -1722,7 +1715,7 @@ def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, 
                 symbol,
                 total_score,
                 volume_score,
-                open_interest_score,
+                volume_oi_ratio_score,
                 otm_score,
                 directional_score,
                 time_score,
@@ -1739,11 +1732,9 @@ def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, 
                 otm_call_percentage,
                 short_term_percentage,
                 call_put_ratio,
-                open_interest_change,
                 as_of_timestamp,
                 event_date,
-                open_interest,
-                prior_open_interest
+                open_interest
             FROM daily_anomaly_snapshot
             WHERE symbol = %s AND event_date = %s
             ORDER BY as_of_timestamp DESC
@@ -1761,7 +1752,7 @@ def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, 
             'composite_score': float(row['total_score']),
             'details': {
                 'volume_score': float(row.get('volume_score', 0)),
-                'open_interest_score': float(row.get('open_interest_score', 0)),
+                'volume_oi_ratio_score': float(row.get('volume_oi_ratio_score', 0)),
                 'otm_score': float(row.get('otm_score', 0)),
                 'directional_score': float(row.get('directional_score', 0)),
                 'time_score': float(row.get('time_score', 0)),
@@ -1772,8 +1763,6 @@ def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, 
                 'put_baseline_avg': float(row.get('put_baseline_avg', 0)),
                 'call_multiplier': float(row.get('call_multiplier', 0)),
                 'current_open_interest': int(row.get('open_interest', 0)),
-                'prior_open_interest': int(row.get('prior_open_interest', 0)),
-                'open_interest_multiplier': float(row.get('open_interest_change', 0)),
                 'pattern_description': row.get('pattern_description', 'Unusual trading pattern'),
                 'z_score': float(row.get('z_score', 0))
             }
@@ -1845,11 +1834,11 @@ def create_basic_symbol_analysis(symbol: str, selected_date: date = None) -> Non
         st.warning(f"No historical data available for {symbol}")
         return
     
-    # Get anomaly data for this symbol (even if below 7.0 threshold)
+    # Get anomaly data for this symbol (even if below 7.5 threshold)
     anomaly_data = get_symbol_anomaly_data(symbol, selected_date)
     
     if anomaly_data:
-        # Show anomaly scores even if below 7.0
+        # Show anomaly scores even if below 7.5
         st.subheader("Anomaly Analysis")
         details = anomaly_data.get('details', {})
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -1863,9 +1852,9 @@ def create_basic_symbol_analysis(symbol: str, selected_date: date = None) -> Non
         
         with col2:
             st.metric(
-                "Open Interest Score", 
-                f"{details.get('open_interest_score', 0):.1f}/2.0",
-                help="Open interest change vs prior day"
+                "Volume:OI Ratio Score", 
+                f"{details.get('volume_oi_ratio_score', 0):.1f}/2.0",
+                help="Volume to open interest ratio anomaly vs historical baseline"
             )
         
         with col3:
@@ -1897,7 +1886,6 @@ def create_basic_symbol_analysis(symbol: str, selected_date: date = None) -> Non
         call_baseline = details.get('call_baseline_avg', 1)
         put_baseline = details.get('put_baseline_avg', 1)
         current_open_interest = details.get('current_open_interest', 0)
-        prior_open_interest = details.get('prior_open_interest', 0)
         open_interest_multiplier = details.get('open_interest_multiplier', 0)
         
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -1936,7 +1924,7 @@ def create_basic_symbol_analysis(symbol: str, selected_date: date = None) -> Non
                 "Open Interest",
                 f"{current_open_interest:,}",
                 delta=f"{open_interest_multiplier:.1f}x vs prior day",
-                help=f"Current: {current_open_interest:,} vs Prior: {prior_open_interest:,}"
+                help=f"Current open interest: {current_open_interest:,}"
             )
     else:
         # Show basic metrics if no anomaly data

@@ -19,7 +19,6 @@ import pytz
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database.core.connection import db
-from database.core.stock_data import StockDataManager
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +28,6 @@ EST_TZ = pytz.timezone('US/Eastern')
 def get_est_now():
     """Get current datetime in EST timezone"""
     return datetime.now(EST_TZ)
-
-def get_est_date():
-    """Get current date in EST timezone"""
-    return datetime.now(EST_TZ).date()
 
 
 class BulkStockDataLoader:
@@ -439,7 +434,7 @@ class BulkStockDataLoader:
         for result in polygon_response['results']:
             try:
                 # Prepare CSV row
-                date_val = StockDataManager.polygon_timestamp_to_date(result['t'])
+                date_val = datetime.fromtimestamp(result['t'] / 1000).date()
                 symbol = result['T']
                 close = float(result['c'])
                 high = float(result['h'])
@@ -571,7 +566,7 @@ class BulkStockDataLoader:
         for result in polygon_response['results']:
             try:
                 record = (
-                    StockDataManager.polygon_timestamp_to_date(result['t']),
+                    datetime.fromtimestamp(result['t'] / 1000).date(),
                     result['T'],
                     float(result['c']),
                     float(result['h']),
@@ -793,55 +788,6 @@ class BulkStockDataLoader:
             conn.rollback()
             raise
     
-    def bulk_insert_option_contracts_batch(self, batch_responses: List[Dict[str, Any]], as_of_date: str,
-                                          method: str = 'copy') -> bool:
-        """
-        High-performance bulk insert for multiple option contract API responses.
-        Processes all symbols for a date in a single batch operation.
-        
-        Args:
-            batch_responses: List of Polygon API responses
-            as_of_date: Date string for the as_of parameter
-            method: Loading method ('copy', 'execute_values', or 'auto')
-            
-        Returns:
-            bool: Success status
-        """
-        if not batch_responses:
-            logger.warning("No API responses to process")
-            return False
-        
-        # Combine all results from all API responses
-        combined_results = []
-        total_contracts = 0
-        
-        for response in batch_responses:
-            if response and response.get('results'):
-                combined_results.extend(response['results'])
-                total_contracts += len(response['results'])
-        
-        if not combined_results:
-            logger.warning("No option contracts found in batch responses")
-            return True  # Not an error, just no data
-        
-        # Create a combined response structure
-        combined_response = {
-            "status": "OK",
-            "results": combined_results,
-            "resultsCount": total_contracts
-        }
-        
-        logger.info(f"Processing batch of {total_contracts:,} option contracts from {len(batch_responses)} API responses using {method} method...")
-        
-        try:
-            if method == 'copy' or (method == 'auto' and total_contracts > 100):
-                return self.bulk_upsert_option_contracts_copy(combined_response, as_of_date)
-            else:
-                return self.bulk_upsert_option_contracts_copy(combined_response, as_of_date)
-                
-        except Exception as e:
-            logger.error(f"Option contracts batch bulk insert failed with {method} method: {e}")
-            raise
     
     def bulk_insert_option_snapshots_batch(self, batch_responses: List[Dict[str, Any]], 
                                           method: str = 'copy') -> bool:
@@ -1359,75 +1305,7 @@ class BulkStockDataLoader:
             logger.error(f"Option snapshots flat-file COPY upsert failed: {e}")
             raise
     
-    def bulk_insert_option_contracts(self, polygon_response: Dict[str, Any], as_of_date: str,
-                                   method: str = 'copy') -> bool:
-        """
-        High-performance bulk insert for option contracts.
-        
-        Args:
-            polygon_response: Response from Polygon Options API
-            as_of_date: Date string for the as_of parameter
-            method: Loading method ('copy', 'execute_values', or 'auto')
-            
-        Returns:
-            bool: Success status
-        """
-        if not polygon_response.get('results'):
-            logger.warning("No results found in Polygon response")
-            return False
-        
-        record_count = len(polygon_response['results'])
-        logger.info(f"Processing {record_count:,} option contracts using {method} method...")
-        
-        try:
-            if method == 'copy' or (method == 'auto' and record_count > 100):
-                return self.bulk_upsert_option_contracts_copy(polygon_response, as_of_date)
-            else:
-                # For smaller datasets, could implement execute_values method
-                # For now, fallback to copy method
-                return self.bulk_upsert_option_contracts_copy(polygon_response, as_of_date)
-                
-        except Exception as e:
-            logger.error(f"Option contracts bulk insert failed with {method} method: {e}")
-            raise
     
-    def bulk_insert_daily_snapshots(self, polygon_response: Dict[str, Any], 
-                                   method: str = 'copy') -> bool:
-        """
-        High-performance bulk insert with multiple loading strategies.
-        
-        Args:
-            polygon_response: Response from Polygon API
-            method: Loading method ('copy', 'execute_values', or 'auto')
-            
-        Returns:
-            bool: Success status
-        """
-        if not polygon_response.get('results'):
-            logger.warning("No results found in Polygon response")
-            return False
-        
-        record_count = len(polygon_response['results'])
-        logger.info(f"Processing {record_count:,} records using {method} method...")
-        
-        try:
-            if method == 'copy' or (method == 'auto' and record_count > 1000):
-                return self.bulk_upsert_copy(polygon_response)
-            elif method == 'execute_values' or method == 'auto':
-                return self.bulk_upsert_execute_values(polygon_response)
-            else:
-                # Fallback to original method
-                return StockDataManager.insert_daily_snapshots(polygon_response)
-                
-        except Exception as e:
-            logger.error(f"Bulk insert failed with {method} method: {e}")
-            
-            # Try fallback method if copy fails
-            if method == 'copy':
-                logger.info("Retrying with execute_values method...")
-                return self.bulk_upsert_execute_values(polygon_response)
-            else:
-                raise
     
     def get_performance_stats(self) -> Dict[str, Any]:
         """Get performance statistics."""
@@ -1455,9 +1333,12 @@ class BulkStockDataLoader:
     def update_daily_option_snapshot_greeks_and_iv_from_temp(self, target_date: str) -> Dict[str, Any]:
         """
         For a given date, update the Greeks and implied volatility columns in daily_option_snapshot
-        with the latest data from temp_option (prior day's data).
+        with the latest data from temp_option.
         
         This updates: implied_volatility, greeks_delta, greeks_gamma, greeks_theta, greeks_vega
+        
+        Logic: Find the most recent temp_option data where DATE(as_of_timestamp) = target_date
+        This ensures we're using intraday data from the same trading day as the daily snapshot.
         """
         start = time.time()
         conn = db.connect()
@@ -1538,68 +1419,6 @@ class BulkStockDataLoader:
             'execution_time': time.time() - start
         }
 
-class DatabaseOptimizer:
-    """
-    Database connection and configuration optimizer for bulk operations.
-    """
-    
-    @staticmethod
-    def optimize_connection_for_bulk_ops():
-        """
-        Optimize database connection settings for bulk operations.
-        """
-        optimization_sql = [
-            # Disable autocommit for better transaction control
-            "SET autocommit = false;",
-            
-            # Increase work memory for sorting/hashing
-            "SET work_mem = '256MB';",
-            
-            # Disable synchronous commits for speed (less durable but faster)
-            "SET synchronous_commit = off;",
-            
-            # Increase checkpoint segments
-            "SET checkpoint_segments = 32;",
-            
-            # Increase shared buffers if possible
-            "SET shared_buffers = '256MB';"
-        ]
-        
-        try:
-            conn = db.connect()
-            with conn.cursor() as cursor:
-                for sql in optimization_sql:
-                    try:
-                        cursor.execute(sql)
-                    except Exception as e:
-                        logger.debug(f"Optimization setting skipped: {sql} - {e}")
-            
-            logger.info("Database optimized for bulk operations")
-            
-        except Exception as e:
-            logger.warning(f"Failed to optimize database settings: {e}")
-    
-    @staticmethod
-    def disable_triggers_temporarily(table_name: str = "daily_stock_snapshot"):
-        """
-        Temporarily disable triggers for faster bulk loading.
-        """
-        try:
-            db.execute_command(f"ALTER TABLE {table_name} DISABLE TRIGGER ALL;")
-            logger.info(f"Triggers disabled for {table_name}")
-        except Exception as e:
-            logger.warning(f"Failed to disable triggers: {e}")
-    
-    @staticmethod
-    def enable_triggers(table_name: str = "daily_stock_snapshot"):
-        """
-        Re-enable triggers after bulk loading.
-        """
-        try:
-            db.execute_command(f"ALTER TABLE {table_name} ENABLE TRIGGER ALL;")
-            logger.info(f"Triggers enabled for {table_name}")
-        except Exception as e:
-            logger.warning(f"Failed to enable triggers: {e}")
 
     def enrich_temp_option_underlying_prices(self) -> Dict[str, Any]:
         """
@@ -1669,63 +1488,5 @@ class DatabaseOptimizer:
                 conn.close()
 
 
-# Convenience functions
-def bulk_insert_polygon_data(polygon_response: Dict[str, Any], 
-                            method: str = 'auto') -> bool:
-    """
-    Convenience function for bulk inserting Polygon data.
-    
-    Args:
-        polygon_response: Polygon API response
-        method: 'copy', 'execute_values', or 'auto'
-    
-    Returns:
-        bool: Success status
-    """
-    loader = BulkStockDataLoader()
-    
-    # Optimize database for bulk operations
-    DatabaseOptimizer.optimize_connection_for_bulk_ops()
-    
-    try:
-        # Disable triggers for maximum speed
-        DatabaseOptimizer.disable_triggers_temporarily()
-        
-        # Perform bulk insert
-        success = loader.bulk_insert_daily_snapshots(polygon_response, method)
-        
-        if success:
-            stats = loader.get_performance_stats()
-            logger.info(f"Bulk insert performance: {stats['average_records_per_second']:.0f} records/sec")
-        
-        return success
-        
-    finally:
-        # Always re-enable triggers
-        DatabaseOptimizer.enable_triggers()
 
 
-if __name__ == "__main__":
-    # Test the bulk loader
-    logging.basicConfig(level=logging.INFO)
-    
-    # Example usage
-    sample_response = {
-        "status": "OK",
-        "results": [
-            {
-                "T": "AAPL",
-                "c": 150.25,
-                "h": 152.00,
-                "l": 149.50,
-                "n": 1250,
-                "o": 151.00,
-                "t": 1602705600000,
-                "v": 2500000,
-                "vw": 150.75
-            }
-        ]
-    }
-    
-    success = bulk_insert_polygon_data(sample_response)
-    print(f"Bulk insert test: {'SUCCESS' if success else 'FAILED'}")
