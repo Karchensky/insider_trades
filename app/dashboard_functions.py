@@ -101,7 +101,10 @@ def get_current_anomalies() -> pd.DataFrame:
                 call_put_ratio,
                 as_of_timestamp,
                 event_date,
-                open_interest
+                open_interest,
+                call_magnitude,
+                put_magnitude,
+                total_magnitude
             FROM daily_anomaly_snapshot
             WHERE total_score >= 7.5 AND total_magnitude >= 20000
             ORDER BY total_score DESC, as_of_timestamp DESC
@@ -210,6 +213,7 @@ def get_symbol_history(symbol: str, days: int = 30) -> Dict[str, pd.DataFrame]:
                 o.session_close,
                 o.implied_volatility,
                 o.greeks_delta,
+                oc.shares_per_contract,
                 COALESCE(s.day_close, s.day_vwap) as underlying_price,
                 o.as_of_timestamp
             FROM temp_option o
@@ -318,7 +322,7 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
                 
                 # Determine insider pattern and appropriate multiplier
                 if call_percentage >= 80:
-                    pattern = "Strong bullish insider activity"
+                    pattern = "Bullish insider activity"
                     volume_text = f"{call_multiplier:.1f}x normal call volume"
                 elif call_percentage <= 20:
                     pattern = "Strong bearish insider activity"
@@ -339,6 +343,11 @@ def create_anomaly_summary_table(anomalies_df: pd.DataFrame) -> None:
                 volume_score = safe_numeric(row.get('volume_score', 0))
                 directional_score = safe_numeric(row.get('directional_score', 0))
                 time_score = safe_numeric(row.get('time_score', 0))
+                
+                # Calculate magnitude data
+                call_magnitude = safe_numeric(row.get('call_magnitude', 0))
+                put_magnitude = safe_numeric(row.get('put_magnitude', 0))
+                total_magnitude = call_magnitude + put_magnitude
                 
                 key_indicators = f"""• Volume Score: {volume_score:.1f}/3.0 ({volume_text})
 • Volume:OI Score: {volume_oi_ratio_score:.1f}/2.0 (Call: {call_volume:,} vs {call_open_interest:,} OI)
@@ -484,6 +493,11 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
                     volume_score = safe_numeric(row.get('volume_score', 0))
                     directional_score = safe_numeric(row.get('directional_score', 0))
                     time_score = safe_numeric(row.get('time_score', 0))
+                    
+                    # Calculate magnitude data
+                    call_magnitude = safe_numeric(row.get('call_magnitude', 0))
+                    put_magnitude = safe_numeric(row.get('put_magnitude', 0))
+                    total_magnitude = call_magnitude + put_magnitude
                     
                     key_indicators = f"""• Volume Score: {volume_score:.1f}/3.0 ({volume_text})
 • Volume:OI Score: {volume_oi_ratio_score:.1f}/2.0 (Call: {call_volume:,} vs {call_open_interest:,} OI)
@@ -1556,7 +1570,10 @@ def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, 
                 call_put_ratio,
                 as_of_timestamp,
                 event_date,
-                open_interest
+                open_interest,
+                call_magnitude,
+                put_magnitude,
+                total_magnitude
             FROM daily_anomaly_snapshot
             WHERE symbol = %s AND event_date = %s
             ORDER BY as_of_timestamp DESC
