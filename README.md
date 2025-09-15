@@ -184,9 +184,10 @@ The system uses a **1-10 scoring scale** focusing on **statistical anomalies** r
 
 - Analyzes call and put volume separately against symbol-specific baselines
 - Calculates Z-scores: `z = (current_volume - baseline_avg) / baseline_stddev`
-- Call Score: `min(call_z_score / 3.0, 1.5)` (max 3.0 points)
-- Put Score: `min(put_z_score / 3.0, 1.5)` (max 3.0 points)
-- Total: Max of call or put score
+- Only rewards HIGH volume anomalies (ignores low volume)
+- Call Score: `min(call_z_score / 2, 3.0)` (max 3.0 points at 6 standard deviations)
+- Put Score: `min(put_z_score / 2, 3.0)` (max 3.0 points at 6 standard deviations)
+- Final Score: Max of call or put score (not sum)
 
 #### 2. OTM Options Concentration Score (0-2 points)
 

@@ -455,14 +455,14 @@ class InsiderAnomalyDetector:
         call_std = float(call_baseline.get('stddev_daily_volume', 1))
         if call_std > 0 and call_avg > 0 and call_volume > call_avg:
             call_z = (call_volume - call_avg) / call_std  # Only positive z-scores (high volume)
-            call_score = min(call_z, 3.0)  # Max 3.0 points at 3 standard deviations
+            call_score = min(call_z / 2, 3.0)  # Divide by 2, max 3.0 points at 6 standard deviations
         
         # Put volume z-score (only reward HIGH volume, not low volume)
         put_avg = float(put_baseline.get('avg_daily_volume', 0))
         put_std = float(put_baseline.get('stddev_daily_volume', 1))
         if put_std > 0 and put_avg > 0 and put_volume > put_avg:
             put_z = (put_volume - put_avg) / put_std  # Only positive z-scores (high volume)
-            put_score = min(put_z, 3.0)  # Max 3.0 points at 3 standard deviations
+            put_score = min(put_z / 2, 3.0)  # Divide by 2, max 3.0 points at 6 standard deviations
         
         # Take the highest anomaly (either call or put direction)
         return max(call_score, put_score)

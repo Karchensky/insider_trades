@@ -65,6 +65,7 @@ def get_ordered_anomaly_symbols(anomalies_df: pd.DataFrame) -> List[str]:
 def get_current_anomalies() -> pd.DataFrame:
     """Get current high-conviction anomalies from daily_anomaly_snapshot table."""
     conn = db.connect()
+    cur = None
     try:
         # Use cursor with RealDictCursor for reliable data access
         import psycopg2.extras
@@ -128,6 +129,8 @@ def get_current_anomalies() -> pd.DataFrame:
         st.error(f"Error fetching anomalies: {e}")
         return pd.DataFrame()
     finally:
+        if cur:
+            cur.close()
         conn.close()
 
 @st.cache_data(ttl=180)  # Cache for 3 minutes
@@ -796,6 +799,7 @@ def create_options_activity_chart(options_df: pd.DataFrame, symbol: str) -> None
 def get_performance_matrix_data() -> pd.DataFrame:
     """Get performance matrix data showing price movements after anomalies."""
     conn = db.connect()
+    cur = None
     try:
         import psycopg2.extras
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -843,6 +847,8 @@ def get_performance_matrix_data() -> pd.DataFrame:
         st.error(f"Error fetching performance matrix data: {e}")
         return pd.DataFrame()
     finally:
+        if cur:
+            cur.close()
         conn.close()
 
 def create_performance_matrix() -> None:
@@ -1070,6 +1076,7 @@ def create_anomaly_timeline_chart(timeline_df: pd.DataFrame) -> None:
 def get_options_heatmap_data(symbol: str, target_date: date = None) -> pd.DataFrame:
     """Get options data for heatmap visualization by strike and expiration."""
     conn = db.connect()
+    cur = None
     try:
         import psycopg2.extras
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -1143,6 +1150,8 @@ def get_options_heatmap_data(symbol: str, target_date: date = None) -> pd.DataFr
         st.error(f"Error fetching heatmap data: {e}")
         return pd.DataFrame()
     finally:
+        if cur:
+            cur.close()
         conn.close()
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes
