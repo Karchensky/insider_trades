@@ -118,7 +118,7 @@ class InsiderAnomalyDetector:
                         o.greeks_gamma,
                         o.greeks_theta,
                         o.greeks_vega,
-                        oc.shares_per_contract,
+                        COALESCE(oc.shares_per_contract, 100) as shares_per_contract,
                         COALESCE(s.day_close, s.day_vwap, o.underlying_price, 0) as underlying_price,
                         o.as_of_timestamp
                     FROM latest_temp_option o
@@ -317,9 +317,9 @@ class InsiderAnomalyDetector:
             put_magnitude = 0
             
             for c in contracts:
-                volume = c['session_volume']
-                price = c.get('session_close', 0)
-                shares_per_contract = c.get('shares_per_contract', 100)  # Default to 100 if not found
+                volume = c.get('session_volume', 0) or 0
+                price = c.get('session_close', 0) or 0
+                shares_per_contract = c.get('shares_per_contract') or 100  # Default to 100 if None or missing
                 
                 magnitude = volume * price * shares_per_contract
                 
