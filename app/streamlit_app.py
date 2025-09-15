@@ -98,10 +98,18 @@ def main():
     if selected_symbol and selected_symbol not in all_symbols:
         all_symbols = [selected_symbol] + all_symbols
     
+    # Handle "Return to Summary" button before creating selectbox
+    if 'return_to_summary' in st.session_state and st.session_state.return_to_summary:
+        selected_symbol = 'Overview'
+        st.session_state.selected_symbol = 'Overview'
+        st.session_state.return_to_summary = False
+        st.query_params.clear()
+    
     selected_symbol = st.sidebar.selectbox(
         "Select Symbol for Analysis",
         all_symbols,
-        index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0
+        index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0,
+        key="selected_symbol"
     )
     
     # Update session state when symbol changes
@@ -120,9 +128,8 @@ def main():
     # Buttons
     if selected_symbol and selected_symbol != 'Overview':
         if st.sidebar.button("Return to Summary"):
-            # Clear any URL parameters and set Overview
-            st.query_params.clear()
-            st.session_state.selected_symbol = 'Overview'
+            # Set flag to return to summary on next rerun
+            st.session_state.return_to_summary = True
             st.rerun()
     
     if st.sidebar.button("Refresh Data"):
