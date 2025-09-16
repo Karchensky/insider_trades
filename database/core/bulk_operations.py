@@ -1140,7 +1140,35 @@ class BulkStockDataLoader:
             except Exception:
                 return default_date
 
+        # Pre-fetch all symbols we need in a single query to avoid excessive connections
+        contract_tickers_set = set()
+        rows_list = []
+        
+        # First pass: collect all unique contract tickers
         for r in rows:
+            contract_ticker = r.get('ticker') or r.get('symbol') or ''
+            if contract_ticker:
+                contract_tickers_set.add(contract_ticker)
+                rows_list.append(r)
+        
+        # Single query to get all symbols from option_contracts
+        symbols_cache = {}
+        if contract_tickers_set:
+            conn = db.connect()
+            try:
+                with conn.cursor() as cur:
+                    # Use ANY() to get all symbols in one query
+                    cur.execute("""
+                        SELECT contract_ticker, symbol FROM option_contracts 
+                        WHERE contract_ticker = ANY(%s) AND symbol IS NOT NULL
+                    """, (list(contract_tickers_set),))
+                    for row in cur.fetchall():
+                        symbols_cache[row[0]] = row[1]
+            finally:
+                conn.close()
+        
+        # Process rows with cached symbols
+        for r in rows_list:
             try:
                 contract_ticker = r.get('ticker') or r.get('symbol') or ''
                 if not contract_ticker:
@@ -1152,20 +1180,8 @@ class BulkStockDataLoader:
                 # Use 3-step symbol resolution: option_contracts -> API -> regex fallback
                 symbol = ''
                 if contract_ticker:
-                    # Step 1: Check option_contracts table
-                    conn = db.connect()
-                    try:
-                        with conn.cursor() as cur:
-                            cur.execute("""
-                                SELECT symbol FROM option_contracts 
-                                WHERE contract_ticker = %s AND symbol IS NOT NULL
-                                LIMIT 1
-                            """, (contract_ticker,))
-                            result = cur.fetchone()
-                            if result:
-                                symbol = result[0]
-                    finally:
-                        conn.close()
+                    # Step 1: Check cached symbols from option_contracts
+                    symbol = symbols_cache.get(contract_ticker, '')
                     
                     # Step 2: API fallback if not found in option_contracts
                     if not symbol:
