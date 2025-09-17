@@ -1140,8 +1140,36 @@ class BulkStockDataLoader:
             except Exception:
                 return default_date
 
-        # Process rows directly for bulk COPY - use fast regex symbol extraction
+        # Pre-fetch all symbols we need in a single query to avoid excessive connections
+        contract_tickers_set = set()
+        rows_list = []
+        
+        # First pass: collect all unique contract tickers
         for r in rows:
+            contract_ticker = r.get('ticker') or r.get('symbol') or ''
+            if contract_ticker:
+                contract_tickers_set.add(contract_ticker)
+                rows_list.append(r)
+        
+        # Single query to get all symbols from option_contracts
+        symbols_cache = {}
+        if contract_tickers_set:
+            conn = db.connect()
+            try:
+                with conn.cursor() as cur:
+                    # Use ANY() to get all symbols in one query
+                    cur.execute("""
+                        SELECT contract_ticker, symbol FROM option_contracts 
+                        WHERE contract_ticker = ANY(%s) AND symbol IS NOT NULL
+                    """, (list(contract_tickers_set),))
+                    for row in cur.fetchall():
+                        contract_ticker, symbol = row
+                        symbols_cache[contract_ticker] = symbol
+            finally:
+                conn.close()
+        
+        # Process rows with cached symbols
+        for r in rows_list:
             try:
                 contract_ticker = r.get('ticker') or r.get('symbol') or ''
                 if not contract_ticker:
@@ -1150,16 +1178,36 @@ class BulkStockDataLoader:
                 # Date for the record
                 date_val = default_date or to_date_from_window_start(r.get('window_start')) or ''
 
-                # Fast regex symbol extraction for bulk loading
+                # Use 3-step symbol resolution: option_contracts -> API -> regex fallback
                 symbol = ''
-                if ':' in contract_ticker:
-                    parts = contract_ticker.split(':')
-                    if len(parts) > 1:
-                        option_part = parts[1]
-                        import re
-                        m = re.match(r'^([A-Z]+)', option_part)
-                        if m:
-                            symbol = m.group(1)
+                if contract_ticker:
+                    # Step 1: Check cached symbols from option_contracts
+                    symbol = symbols_cache.get(contract_ticker, '')
+                    
+                    # Step 2: API fallback if not found in option_contracts
+                    if not symbol:
+                        try:
+                            import requests
+                            import os
+                            api_key = os.getenv('POLYGON_API_KEY')
+                            url = f"https://api.polygon.io/v3/reference/options/contracts/{contract_ticker}"
+                            response = requests.get(url, params={'apikey': api_key}, timeout=5)
+                            if response.status_code == 200:
+                                data = response.json()
+                                if data.get('status') == 'OK' and 'results' in data:
+                                    symbol = data['results'].get('underlying_ticker', '')
+                        except Exception:
+                            pass
+                    
+                    # Step 3: Regex fallback if still not found
+                    if not symbol and ':' in contract_ticker:
+                        parts = contract_ticker.split(':')
+                        if len(parts) > 1:
+                            option_part = parts[1]
+                            import re
+                            m = re.match(r'^([A-Z]+)', option_part)
+                            if m:
+                                symbol = m.group(1)
                 
 
                 def f_num(val: Any) -> Optional[float]:
