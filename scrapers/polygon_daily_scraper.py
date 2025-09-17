@@ -237,7 +237,7 @@ class PolygonDailyScraper:
                     logger.info(f"Starting bulk insert of {record_count:,} records for {date_str}...")
                     
                     # Use bulk loading for better performance
-                    success = self.bulk_loader.bulk_insert_daily_snapshots(market_data, method='auto')
+                    success = self.bulk_loader.bulk_upsert_copy(market_data)
                     
                     if success:
                         results['successful_scrapes'] += 1
