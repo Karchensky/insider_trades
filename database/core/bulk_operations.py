@@ -1111,6 +1111,7 @@ class BulkStockDataLoader:
             conn.rollback()
             raise
 
+
     def bulk_upsert_option_snapshots_from_flat_rows(self, rows: Iterable[Dict[str, Any]], default_date: Optional[str] = None) -> bool:
         """
         Bulk upsert option daily snapshots from Polygon flat-file day aggregates rows.
@@ -1120,6 +1121,7 @@ class BulkStockDataLoader:
 
         Maps to daily_option_snapshot columns via COPY into a temp table, then UPSERT.
         """
+        import time
         start_time = time.time()
 
         # Prepare data for COPY directly from the iterator
@@ -1140,7 +1142,7 @@ class BulkStockDataLoader:
             except Exception:
                 return default_date
 
-        # Pre-fetch all symbols we need in a single query to avoid excessive connections
+        # Efficient symbol resolution: regex extraction + selective correction
         contract_tickers_set = set()
         rows_list = []
         
@@ -1151,21 +1153,57 @@ class BulkStockDataLoader:
                 contract_tickers_set.add(contract_ticker)
                 rows_list.append(r)
         
-        # Single query to get all symbols from option_contracts
-        symbols_cache = {}
+        # Extract regex symbols for all contracts (fast baseline)
+        regex_symbols = {}
+        for contract_ticker in contract_tickers_set:
+            if ':' in contract_ticker:
+                parts = contract_ticker.split(':')
+                if len(parts) > 1:
+                    option_part = parts[1]
+                    import re
+                    m = re.match(r'^([A-Z]+)', option_part)
+                    if m:
+                        regex_symbols[contract_ticker] = m.group(1)
+        
+        # Get symbols from option_contracts for comparison
+        contract_symbols = {}
         if contract_tickers_set:
             conn = db.connect()
             try:
                 with conn.cursor() as cur:
-                    # Use ANY() to get all symbols in one query
                     cur.execute("""
                         SELECT contract_ticker, symbol FROM option_contracts 
                         WHERE contract_ticker = ANY(%s) AND symbol IS NOT NULL
                     """, (list(contract_tickers_set),))
+                    
                     for row in cur.fetchall():
-                        symbols_cache[row[0]] = row[1]
+                        contract_ticker = row['contract_ticker']
+                        symbol = row['symbol']
+                        contract_symbols[contract_ticker] = symbol
+                        
             finally:
                 conn.close()
+        
+        # Determine final symbols: use contract_symbols where different from regex, regex otherwise
+        final_symbols = {}
+        corrections_needed = 0
+        api_calls_needed = 0
+        
+        for contract_ticker in contract_tickers_set:
+            regex_symbol = regex_symbols.get(contract_ticker, '')
+            contract_symbol = contract_symbols.get(contract_ticker, '')
+            
+            if contract_symbol:
+                # Contract exists in option_contracts - use its symbol
+                final_symbols[contract_ticker] = contract_symbol
+                if contract_symbol != regex_symbol:
+                    corrections_needed += 1
+            else:
+                # Contract doesn't exist in option_contracts - use regex for now
+                final_symbols[contract_ticker] = regex_symbol
+                api_calls_needed += 1
+        
+        logger.info(f"Symbol resolution: {len(contract_symbols)} contracts found in option_contracts, {corrections_needed} corrections needed, {api_calls_needed} need API lookup")
         
         # Process rows with cached symbols
         for r in rows_list:
@@ -1177,36 +1215,9 @@ class BulkStockDataLoader:
                 # Date for the record
                 date_val = default_date or to_date_from_window_start(r.get('window_start')) or ''
 
-                # Use 3-step symbol resolution: option_contracts -> API -> regex fallback
-                symbol = ''
-                if contract_ticker:
-                    # Step 1: Check cached symbols from option_contracts
-                    symbol = symbols_cache.get(contract_ticker, '')
-                    
-                    # Step 2: API fallback if not found in option_contracts
-                    if not symbol:
-                        try:
-                            import requests
-                            import os
-                            api_key = os.getenv('POLYGON_API_KEY')
-                            url = f"https://api.polygon.io/v3/reference/options/contracts/{contract_ticker}"
-                            response = requests.get(url, params={'apikey': api_key}, timeout=5)
-                            if response.status_code == 200:
-                                data = response.json()
-                                if data.get('status') == 'OK' and 'results' in data:
-                                    symbol = data['results'].get('underlying_ticker', '')
-                        except Exception:
-                            pass
-                    
-                    # Step 3: Regex fallback if still not found
-                    if not symbol and ':' in contract_ticker:
-                        parts = contract_ticker.split(':')
-                        if len(parts) > 1:
-                            option_part = parts[1]
-                            import re
-                            m = re.match(r'^([A-Z]+)', option_part)
-                            if m:
-                                symbol = m.group(1)
+                # Use pre-computed final symbols
+                symbol = final_symbols.get(contract_ticker, '')
+                
 
                 def f_num(val: Any) -> Optional[float]:
                     if val in (None, "", "\\N"):
@@ -1242,7 +1253,7 @@ class BulkStockDataLoader:
                 continue
 
         if valid_records == 0:
-            logger.warning("No valid option snapshot rows to process from flat file")
+            logger.warning(f"No valid option snapshot rows to process from flat file (processed {len(rows_list)} total rows)")
             return False
 
         buffer.seek(0)

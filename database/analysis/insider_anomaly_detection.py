@@ -422,8 +422,8 @@ class InsiderAnomalyDetector:
                     'short_term_percentage': round(short_term_percentage, 1),
                     'call_volume_oi_ratio': round(call_volume / call_open_interest, 4) if call_open_interest > 0 else 0,
                     'put_volume_oi_ratio': round(put_volume / put_open_interest, 4) if put_open_interest > 0 else 0,
-                    'call_volume_oi_z_score': round((call_volume / call_open_interest - call_baseline.get('avg_daily_volume_oi_ratio', 0)) / call_baseline.get('stddev_daily_volume_oi_ratio', 1), 3) if call_open_interest > 0 and call_baseline.get('stddev_daily_volume_oi_ratio', 1) > 0 else 0,
-                    'put_volume_oi_z_score': round((put_volume / put_open_interest - put_baseline.get('avg_daily_volume_oi_ratio', 0)) / put_baseline.get('stddev_daily_volume_oi_ratio', 1), 3) if put_open_interest > 0 and put_baseline.get('stddev_daily_volume_oi_ratio', 1) > 0 else 0,
+                    'call_volume_oi_z_score': round(min(max((call_volume / call_open_interest - call_baseline.get('avg_daily_volume_oi_ratio', 0)) / call_baseline.get('stddev_daily_volume_oi_ratio', 1), -999.999), 999.999), 3) if call_open_interest > 0 and call_baseline.get('stddev_daily_volume_oi_ratio', 1) > 0 else 0,
+                    'put_volume_oi_z_score': round(min(max((put_volume / put_open_interest - put_baseline.get('avg_daily_volume_oi_ratio', 0)) / put_baseline.get('stddev_daily_volume_oi_ratio', 1), -999.999), 999.999), 3) if put_open_interest > 0 and put_baseline.get('stddev_daily_volume_oi_ratio', 1) > 0 else 0,
                     'call_volume_oi_avg': round(call_baseline.get('avg_daily_volume_oi_ratio', 0), 4),
                     'put_volume_oi_avg': round(put_baseline.get('avg_daily_volume_oi_ratio', 0), 4)
                 },
