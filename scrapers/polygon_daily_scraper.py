@@ -282,6 +282,25 @@ class PolygonDailyScraper:
         fallback = current_date - timedelta(days=5)
         return fallback.strftime('%Y-%m-%d')
     
+    def get_previous_trading_day(self) -> str:
+        """
+        Get the previous trading day (not including today).
+        
+        Returns:
+            Date string in YYYY-MM-DD format of the previous trading day
+        """
+        current_date = date.today()
+        
+        # Start from yesterday and go back to find the previous trading day
+        for i in range(1, 8):  # Look back 1-7 days
+            check_date = current_date - timedelta(days=i)
+            if self.is_trading_day(check_date):
+                return check_date.strftime('%Y-%m-%d')
+        
+        # Fallback to 2 days ago if no previous trading day found
+        fallback = current_date - timedelta(days=2)
+        return fallback.strftime('%Y-%m-%d')
+    
     def get_recent_trading_days(self, num_days: int) -> Tuple[str, str]:
         """
         Get date range for the most recent N trading days.

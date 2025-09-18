@@ -154,26 +154,34 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
         logger.error(f"[symbol_mismatch_check] Failed to check/fix symbol mismatches: {mismatch_error}")
         # Continue with pipeline even if mismatch check fails
 
-    # Step 5: Update daily_option_snapshot with Greeks and IV from prior day's temp data
-    # Only update the most recent business day with prior day's temp data
-    logger.info("[daily_option_snapshot] Step 5a: Updating Greeks and IV with prior day's temp data...")
+    # Step 5: Update daily_option_snapshot with Greeks and IV from temp data
+    # Match temp_option run timestamp dates to daily_option_snapshot dates (no guessing)
+    logger.info("[daily_option_snapshot] Step 5a: Updating Greeks and IV with temp data...")
     from database.core.bulk_operations import BulkStockDataLoader as _Loader
     _l = _Loader()
     
-    # Get the most recent business day before current run date
-    current_date = _dt.now().date()
-    most_recent_business_day = stock_scraper.get_most_recent_trading_day()
+    # Find available dates in temp_option and match them to daily_option_snapshot
+    from database.core.connection import db
+    temp_dates = db.execute_query("""
+        SELECT DISTINCT DATE(as_of_timestamp) as temp_date, COUNT(*) as record_count
+        FROM temp_option 
+        GROUP BY DATE(as_of_timestamp) 
+        ORDER BY temp_date DESC
+    """)
     
-    # Only update if the most recent business day is before current date
-    if most_recent_business_day < current_date.strftime('%Y-%m-%d'):
-        logger.info(f"[daily_option_snapshot] Updating Greeks/IV for most recent business day: {most_recent_business_day}")
-        try:
-            out = _l.update_daily_option_snapshot_greeks_and_iv_from_temp(most_recent_business_day)
-            logger.info(f"[daily_option_snapshot] {most_recent_business_day} updated={out['records_updated']} records with Greeks/IV in {out['execution_time']:.2f}s")
-        except Exception as ce:
-            logger.error(f"[daily_option_snapshot] {most_recent_business_day} Greeks/IV update failed: {ce}")
+    if temp_dates:
+        logger.info(f"[daily_option_snapshot] Found temp_option data for {len(temp_dates)} date(s)")
+        for temp_date_info in temp_dates:
+            temp_date = temp_date_info['temp_date']
+            record_count = temp_date_info['record_count']
+            logger.info(f"[daily_option_snapshot] Updating Greeks/IV for {temp_date} ({record_count:,} temp records)")
+            try:
+                out = _l.update_daily_option_snapshot_greeks_and_iv_from_temp(str(temp_date))
+                logger.info(f"[daily_option_snapshot] {temp_date} updated={out['records_updated']} records with Greeks/IV in {out['execution_time']:.2f}s")
+            except Exception as ce:
+                logger.error(f"[daily_option_snapshot] {temp_date} Greeks/IV update failed: {ce}")
     else:
-        logger.info(f"[daily_option_snapshot] Skipping Greeks/IV update - most recent business day ({most_recent_business_day}) is current date")
+        logger.info("[daily_option_snapshot] No temp_option data found - skipping Greeks/IV update")
 
     # Step 6: Run fresh temp_option data to get correct open_interest for the dates being processed
     logger.info("[temp_option] Step 5b: Running fresh intraday snapshot to get correct open_interest...")
@@ -271,24 +279,19 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
         logger.warning("[temp_option] Continuing with stale temp data (open_interest may be incorrect)")
 
     # Step 7: Update daily_option_snapshot with fresh open_interest data only
-    # Only update the most recent business day before current run date
+    # Use current day temp_option data to update previous business day's records
+    # Note: temp_option open_interest represents prior business day's close (handles weekends/holidays)
     logger.info("[daily_option_snapshot] Step 5c: Updating open_interest with fresh temp data...")
     
-    # Get the most recent business day before current run date
-    from datetime import datetime as _dt, timedelta as _td
-    current_date = _dt.now().date()
-    most_recent_business_day = stock_scraper.get_most_recent_trading_day()
+    # Get the previous business day (handles weekends/holidays properly)
+    previous_business_day = stock_scraper.get_previous_trading_day()
     
-    # Only update if the most recent business day is before current date
-    if most_recent_business_day < current_date.strftime('%Y-%m-%d'):
-        logger.info(f"[daily_option_snapshot] Updating open_interest for most recent business day: {most_recent_business_day}")
-        try:
-            out = _l.update_daily_option_snapshot_open_interest_from_temp(most_recent_business_day)
-            logger.info(f"[daily_option_snapshot] {most_recent_business_day} updated={out['records_updated']} records with fresh open_interest in {out['execution_time']:.2f}s")
-        except Exception as ce:
-            logger.error(f"[daily_option_snapshot] {most_recent_business_day} open_interest update failed: {ce}")
-    else:
-        logger.info(f"[daily_option_snapshot] Skipping open_interest update - most recent business day ({most_recent_business_day}) is current date")
+    logger.info(f"[daily_option_snapshot] Updating open_interest for previous business day: {previous_business_day}")
+    try:
+        out = _l.update_daily_option_snapshot_open_interest_from_temp(previous_business_day)
+        logger.info(f"[daily_option_snapshot] {previous_business_day} updated={out['records_updated']} records with fresh open_interest in {out['execution_time']:.2f}s")
+    except Exception as ce:
+        logger.error(f"[daily_option_snapshot] {previous_business_day} open_interest update failed: {ce}")
 
     logger.info("[anomaly_retention] Keeping daily_anomaly_snapshot data for ongoing analysis")
 
