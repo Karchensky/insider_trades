@@ -208,6 +208,7 @@ class BulkStockDataLoader:
         results = snapshot_response.get('results') or []
         buf = StringIO()
         rows = 0
+        sanitized_greeks_count = 0
 
         from datetime import datetime, timezone
         def to_ts(ns):
@@ -221,6 +222,31 @@ class BulkStockDataLoader:
 
         def f(v):
             return str(v) if v is not None else '\\N'
+        
+        def sanitize_greek(value, name, max_abs_value):
+            """
+            Sanitize option greek values to prevent database overflow.
+            Returns None if value is invalid or exceeds reasonable bounds.
+            
+            Args:
+                value: The greek value from API
+                name: Name of the greek (for logging)
+                max_abs_value: Maximum absolute value considered valid
+            """
+            if value is None:
+                return None
+            try:
+                val = float(value)
+                # Check for NaN, Inf, or values exceeding reasonable bounds
+                if not (-max_abs_value <= val <= max_abs_value):
+                    nonlocal sanitized_greeks_count
+                    sanitized_greeks_count += 1
+                    return None
+                return val
+            except (ValueError, TypeError, OverflowError):
+                nonlocal sanitized_greeks_count
+                sanitized_greeks_count += 1
+                return None
 
         for r in results:
             try:
@@ -257,10 +283,21 @@ class BulkStockDataLoader:
                 # FALLBACK: If no underlying price in API response, we need to enrich later
                 # For now, we'll store NULL and enrich post-load
 
+                # Sanitize greek values to prevent database overflow
+                # Realistic bounds based on typical option greek ranges:
+                # Delta: -1 to 1 (but allow up to ±10 for edge cases)
+                # Gamma: 0 to ~0.1 typically (allow up to 1000 for deep ITM/OTM)
+                # Theta: -10 to 0 typically (allow up to ±1000 for extreme cases)
+                # Vega: 0 to ~100 typically (allow up to 10000 for high-IV scenarios)
+                delta_clean = sanitize_greek(greeks.get('delta'), 'delta', 10.0)
+                gamma_clean = sanitize_greek(greeks.get('gamma'), 'gamma', 1000.0)
+                theta_clean = sanitize_greek(greeks.get('theta'), 'theta', 1000.0)
+                vega_clean = sanitize_greek(greeks.get('vega'), 'vega', 10000.0)
+                
                 buf.write(
                     f"{f(as_of)}\t{symbol_val}\t{contract_ticker}\t"
                     f"{f(r.get('break_even_price'))}\t{f(details.get('strike_price'))}\t{f(r.get('implied_volatility'))}\t{f(r.get('open_interest'))}\t"
-                    f"{f(greeks.get('delta'))}\t{f(greeks.get('gamma'))}\t{f(greeks.get('theta'))}\t{f(greeks.get('vega'))}\t"
+                    f"{f(delta_clean)}\t{f(gamma_clean)}\t{f(theta_clean)}\t{f(vega_clean)}\t"
                     f"{f(details.get('contract_type'))}\t{f(details.get('exercise_style'))}\t{f(details.get('expiration_date'))}\t{f(details.get('shares_per_contract'))}\t"
                     f"{f(session.get('open'))}\t{f(session.get('high'))}\t{f(session.get('low'))}\t{f(session.get('close'))}\t{f(session.get('volume'))}\t"
                     f"{f(session.get('change'))}\t{f(session.get('change_percent'))}\t"
@@ -275,6 +312,8 @@ class BulkStockDataLoader:
                 continue
 
         buf.seek(0)
+        if sanitized_greeks_count > 0:
+            logger.warning(f"Sanitized {sanitized_greeks_count} invalid greek values (set to NULL) out of {rows * 4} total greeks")
         return buf, rows
 
     def bulk_upsert_temp_option_copy(self, snapshot_response: Dict[str, Any]) -> Dict[str, Any]:
