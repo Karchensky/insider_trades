@@ -233,18 +233,17 @@ class BulkStockDataLoader:
                 name: Name of the greek (for logging)
                 max_abs_value: Maximum absolute value considered valid
             """
+            nonlocal sanitized_greeks_count
             if value is None:
                 return None
             try:
                 val = float(value)
                 # Check for NaN, Inf, or values exceeding reasonable bounds
                 if not (-max_abs_value <= val <= max_abs_value):
-                    nonlocal sanitized_greeks_count
                     sanitized_greeks_count += 1
                     return None
                 return val
             except (ValueError, TypeError, OverflowError):
-                nonlocal sanitized_greeks_count
                 sanitized_greeks_count += 1
                 return None
 
