@@ -152,21 +152,34 @@ def run_once(include_otc: bool,
                 # Compute missing tickers and attempt one retry for them
                 returned_tickers = {r.get('ticker') for r in combined_results if r.get('ticker')}
                 missing = list(requested_in_group - returned_tickers)
+                logger.info("[temp_option] Super-batch summary: requested=%d, received=%d, missing=%d", 
+                           len(requested_in_group), len(returned_tickers), len(missing))
                 if missing:
-                    logger.info("[temp_option] Retrying %d missing tickers in smaller batches", len(missing))
+                    logger.warning("[temp_option] Retrying %d missing tickers in smaller batches", len(missing))
                     # Retry in batches capped at 50 to avoid URL length and pool pressure
                     retry_batches = [missing[i:i+50] for i in range(0, len(missing), 50)]
                     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
                     with _TPE(max_workers=min(options_workers, 10)) as ex2:
                         futs = {ex2.submit(opt_scraper.fetch_by_tickers, b): b for b in retry_batches}
+                        retry_success = 0
                         for fut in _ac(futs):
                             try:
                                 data = fut.result()
                                 res = data.get('results') or []
                                 if res:
                                     combined_results.extend(res)
+                                    retry_success += len(res)
                             except Exception as re:
-                                logger.warning("Retry batch failed: %s", re)
+                                failed_batch = futs.get(fut, [])
+                                logger.warning("Retry batch failed (%d tickers): %s", len(failed_batch), re)
+                    # Check if retry recovered the missing data
+                    final_returned = {r.get('ticker') for r in combined_results if r.get('ticker')}
+                    still_missing = list(requested_in_group - final_returned)
+                    if still_missing:
+                        logger.error("[temp_option] PERMANENTLY LOST %d contracts after retry: %s", 
+                                   len(still_missing), still_missing[:10] if len(still_missing) > 10 else still_missing)
+                    elif retry_success > 0:
+                        logger.info("[temp_option] Retry recovered %d contracts", retry_success)
                 if combined_results:
                     out = loader.bulk_upsert_temp_option_copy({'results': combined_results})
                     if out.get('success'):
@@ -175,6 +188,12 @@ def run_once(include_otc: bool,
                     else:
                         logger.error("[temp_option] Super-batch load failed: %s", out.get('error'))
             logger.info("[temp_option] Total loaded: %d rows", total_loaded)
+            
+            # Final coverage report
+            coverage_pct = (total_loaded / total_contracts * 100) if total_contracts > 0 else 0
+            logger.info("[temp_option] Coverage: %d/%d contracts (%.2f%%)", total_loaded, total_contracts, coverage_pct)
+            if coverage_pct < 95.0:
+                logger.warning("[temp_option] LOW COVERAGE - missing %.1f%% of expected contracts", 100 - coverage_pct)
             
             # Run high-conviction insider trading anomaly detection
             logger.info("[anomaly_detection] Starting high-conviction insider trading analysis...")
