@@ -10,7 +10,7 @@ on:
 jobs:
   run-intraday:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
