@@ -28,9 +28,20 @@ from scrapers.polygon_option_flatfile_loader import PolygonOptionFlatFileLoader
 from scrapers.polygon_option_contracts_scraper import PolygonOptionContractsScraper
 from database.maintenance.data_retention import DataRetentionManager
 
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Optional imports for earnings and actionability analysis
+try:
+    from scrapers.earnings_calendar_scraper import (
+        EarningsCalendarScraper, 
+        update_intraday_price_flags, 
+        update_actionability_flags
+    )
+    EARNINGS_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Earnings/actionability modules not available: {e}")
+    EARNINGS_AVAILABLE = False
 
 
 def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
@@ -295,6 +306,31 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
 
     logger.info("[anomaly_retention] Keeping daily_anomaly_snapshot data for ongoing analysis")
 
+    # Step: Fetch earnings calendar data (if available)
+    if EARNINGS_AVAILABLE:
+        # Step: Update actionability flags (intraday price movement, bot detection)
+        logger.info("[actionability] Updating intraday price flags for anomalies...")
+        try:
+            # Update intraday price movement and is_bot_driven flag (threshold: 5%)
+            intraday_result = update_intraday_price_flags(days_back=retention_days, threshold_pct=5.0)
+            logger.info(f"[actionability] Updated intraday flags for {intraday_result.get('records_updated', 0)} records")
+            
+            # Calculate final actionability
+            actionability_result = update_actionability_flags(days_back=retention_days)
+            logger.info(f"[actionability] Updated actionability for {actionability_result.get('records_updated', 0)} records")
+            
+            # Optional: Fetch earnings calendar (can be slow for many symbols)
+            # Uncomment below to enable earnings calendar fetching
+            # logger.info("[earnings] Fetching earnings calendar...")
+            # earnings_scraper = EarningsCalendarScraper()
+            # earnings_result = earnings_scraper.fetch_and_store_for_active_symbols(max_symbols=100)
+            # logger.info(f"[earnings] Fetched earnings for {earnings_result.get('earnings_found', 0)} symbols")
+            
+        except Exception as act_error:
+            logger.warning(f"[actionability] Actionability update error: {act_error}")
+    else:
+        logger.info("[actionability] Skipped - actionability module not available")
+
     # Truncate temp_option and temp_stock to keep only fresh intraday going forward
     # Note: daily_anomaly_snapshot is NOT truncated to preserve ongoing anomaly analysis
     try:
@@ -353,14 +389,14 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
 def main():
     parser = argparse.ArgumentParser(description='Daily ETL Orchestrator')
     parser.add_argument('--recent', type=int, default=int(os.getenv('RECENT_DAYS', '3')), help='Number of recent business days to load (default: 3)')
-    parser.add_argument('--retention', type=int, default=int(os.getenv('RETENTION_DAYS', '30')), help='Retention in business days (default: 30)')
+    parser.add_argument('--retention', type=int, default=int(os.getenv('RETENTION_DAYS', '90')), help='Retention in business days (default: 90)')
     parser.add_argument('--include-otc', action='store_true', help='Include OTC for stocks step (default: false)')
     parser.add_argument('--force', action='store_true', help='Force re-scrape even if data exists')
     parser.add_argument('--ticker-limit', type=int, help='Limit underlying tickers for contracts step (testing)')
     parser.add_argument('--contract-limit', type=int, help='Limit contracts for snapshots step (testing)')
     parser.add_argument('--dry-run-retention', action='store_true', help='Do not delete rows; report only')
-    parser.add_argument('--anomaly-retention', type=int, default=int(os.getenv('ANOMALY_RETENTION_DAYS', '30')), 
-                        help='Anomaly retention in days (default: 30)')
+    parser.add_argument('--anomaly-retention', type=int, default=int(os.getenv('ANOMALY_RETENTION_DAYS', '90')), 
+                        help='Anomaly retention in days (default: 90)')
     parser.add_argument('--no-expired-contracts', action='store_true', 
                         help='Skip fetching expired contracts (active only)')
 

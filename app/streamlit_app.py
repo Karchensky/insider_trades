@@ -2,7 +2,7 @@
 """
 Insider Trading Detection Dashboard
 
-Comprehensive Streamlit application for analyzing and investigating high-conviction
+Comprehensive Streamlit application for analyzing and investigating
 insider trading anomalies detected by the system.
 """
 
@@ -25,7 +25,9 @@ try:
         get_current_anomalies, get_symbol_history,
         create_anomaly_summary_table, create_anomaly_summary_by_date, create_symbol_analysis,
         get_available_symbols, create_options_heatmaps, create_contracts_table, create_basic_symbol_analysis, get_symbol_anomaly_data,
-        create_performance_matrix, get_ordered_anomaly_symbols
+        create_performance_matrix, get_ordered_anomaly_symbols,
+        create_greeks_display, create_performance_analysis_page,
+        get_high_conviction_anomalies, create_greeks_symbol_analysis
     )
     DATABASE_AVAILABLE = True
 except Exception as e:
@@ -42,7 +44,6 @@ st.set_page_config(
 def main():
     """Main Streamlit application."""
     st.title("Insider Trading Detection Dashboard")
-    st.markdown("**High-Conviction Statistical Anomaly Analysis**")
     
     # Check if database is available
     if not DATABASE_AVAILABLE:
@@ -57,7 +58,7 @@ def main():
         
         **For Streamlit.io Deployment:**
         - Make sure to set the `SUPABASE_DB_URL` secret in your Streamlit.io app settings
-        - Go to your Streamlit.io app → Settings → Secrets and add your database URL
+        - Go to your Streamlit.io app -> Settings -> Secrets and add your database URL
         
         **For Local Development:**
         - Ensure your `.env` file contains the correct `SUPABASE_DB_URL`
@@ -68,6 +69,13 @@ def main():
     # Sidebar Configuration
     st.sidebar.header("Navigation")
     
+    # Page selection - 3 main sections
+    page = st.sidebar.radio(
+        "Select View",
+        ["Greeks-Based", "Legacy", "Performance Overview"],
+        index=0
+    )
+    
     # Get current anomalies and available symbols (cached for performance)
     if 'anomalies_df' not in st.session_state:
         st.session_state.anomalies_df = get_current_anomalies()
@@ -77,119 +85,201 @@ def main():
     anomalies_df = st.session_state.anomalies_df
     available_symbols = st.session_state.available_symbols
     
-    # Check for symbol selection from URL parameters or session state
-    if 'symbol' in st.query_params:
-        selected_symbol = st.query_params['symbol']
-    elif 'selected_symbol' in st.session_state:
-        selected_symbol = st.session_state.selected_symbol
-    else:
-        selected_symbol = None
-    
-    # Unified symbol selection
-    st.sidebar.subheader("Symbol Selection")
-    
-    # Show anomaly symbols first, ordered by date descending, score descending
-    # Then all other symbols alphabetically
-    ordered_anomaly_symbols = get_ordered_anomaly_symbols(anomalies_df)
-    other_symbols = sorted([s for s in available_symbols if s not in ordered_anomaly_symbols])
-    all_symbols = ['Overview'] + ordered_anomaly_symbols + other_symbols
-    
-    # If we have a selected symbol from URL/session, make sure it's in the list
-    if selected_symbol and selected_symbol not in all_symbols:
-        all_symbols = [selected_symbol] + all_symbols
-    
-    # Handle "Return to Summary" button before creating selectbox
-    if 'return_to_summary' in st.session_state and st.session_state.return_to_summary:
-        selected_symbol = 'Overview'
-        st.session_state.selected_symbol = 'Overview'
-        st.session_state.return_to_summary = False
-        st.query_params.clear()
-    
-    selected_symbol = st.sidebar.selectbox(
-        "Select Symbol for Analysis",
-        all_symbols,
-        index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0,
-        key="selected_symbol"
-    )
-    
-    # Update session state when symbol changes
-    if selected_symbol != st.session_state.get('selected_symbol'):
-        st.session_state.selected_symbol = selected_symbol
-    
-    # Date selector for analysis
-    selected_date = None
-    if selected_symbol and selected_symbol != 'Overview':
-        selected_date = st.sidebar.date_input(
-            "Select Date for Analysis",
-            value=date.today(),
-            max_value=date.today()
-        )
-    
-    # Buttons
-    if selected_symbol and selected_symbol != 'Overview':
-        if st.sidebar.button("Return to Summary"):
-            # Set flag to return to summary on next rerun
-            st.session_state.return_to_summary = True
-            st.rerun()
-    
+    # Refresh button in sidebar
     if st.sidebar.button("Refresh Data"):
-        # Clear cached data
         if 'anomalies_df' in st.session_state:
             del st.session_state.anomalies_df
         if 'available_symbols' in st.session_state:
             del st.session_state.available_symbols
         st.rerun()
     
+    # Route to appropriate page
+    if page == "Performance Overview":
+        create_performance_analysis_page()
+    elif page == "Greeks-Based":
+        render_greeks_based_page(anomalies_df, available_symbols)
+    else:  # Legacy
+        render_legacy_page(anomalies_df, available_symbols)
+
+
+def render_greeks_based_page(anomalies_df: pd.DataFrame, available_symbols: list):
+    """Render the Greeks-based high conviction interface."""
+    st.markdown("## Greeks-Based High Conviction Alerts")
+    st.markdown("""
+    Alerts scored by Greeks factors (Theta, Gamma, Vega, OTM Score) at 93rd percentile thresholds.
+    **Strategy**: Exit at +100% gain or hold to expiration. **Expected hit rate**: ~50%
+    """)
+    
+    # Filter to high conviction only
+    if not anomalies_df.empty and 'is_high_conviction' in anomalies_df.columns:
+        hc_df = anomalies_df[anomalies_df['is_high_conviction'] == True].copy()
+    else:
+        hc_df = pd.DataFrame()
+    
+    # Symbol selection for Greeks-based view
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Symbol Selection")
+    
+    # Get high conviction symbols ordered by date/score
+    if not hc_df.empty:
+        hc_symbols = get_ordered_anomaly_symbols(hc_df)
+    else:
+        hc_symbols = []
+    
+    all_symbols = ['Overview'] + hc_symbols
+    
+    # Check for existing selection
+    selected_symbol = st.session_state.get('greeks_selected_symbol', 'Overview')
+    if selected_symbol not in all_symbols:
+        selected_symbol = 'Overview'
+    
+    selected_symbol = st.sidebar.selectbox(
+        "Select Symbol",
+        all_symbols,
+        index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0,
+        key="greeks_selected_symbol"
+    )
+    
+    # Date selector for symbol analysis
+    selected_date = None
+    if selected_symbol and selected_symbol != 'Overview':
+        selected_date = st.sidebar.date_input(
+            "Select Date",
+            value=date.today(),
+            max_value=date.today(),
+            key="greeks_date"
+        )
+        if st.sidebar.button("Back to Overview", key="greeks_back"):
+            st.session_state.greeks_selected_symbol = 'Overview'
+            st.rerun()
+    
     # Main content
-    if not selected_symbol or selected_symbol == 'Overview':
-        # Show anomaly overview
+    if selected_symbol == 'Overview':
+        # Show high conviction alerts overview
+        if hc_df.empty:
+            st.info("No high conviction alerts detected.")
+            st.markdown("""
+            High conviction alerts require a Greeks Score >= 3/4 based on:
+            - Theta >= 0.1624
+            - Gamma >= 0.4683
+            - Vega >= 0.1326
+            - OTM Score >= 1.4
+            """)
+        else:
+            # Display alerts table
+            st.subheader(f"Active High Conviction Alerts ({len(hc_df)})")
+            
+            display_df = hc_df[['event_date', 'symbol', 'direction', 'high_conviction_score', 
+                               'recommended_option', 'otm_score', 'total_magnitude']].copy()
+            display_df.columns = ['Date', 'Symbol', 'Direction', 'Greeks Score', 
+                                 'Recommended Option', 'OTM Score', 'Magnitude ($)']
+            display_df['Magnitude ($)'] = display_df['Magnitude ($)'].apply(lambda x: f"${x:,.0f}")
+            display_df['Direction'] = display_df['Direction'].apply(
+                lambda x: "BULLISH" if x == 'call_heavy' else "BEARISH" if x == 'put_heavy' else x
+            )
+            display_df['OTM Score'] = display_df['OTM Score'].apply(lambda x: f"{x:.2f}")
+            display_df['Greeks Score'] = display_df['Greeks Score'].apply(lambda x: f"{x}/4")
+            
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            
+            # Summary stats
+            st.markdown("---")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Alerts", len(hc_df))
+            with col2:
+                bullish = len(hc_df[hc_df['direction'] == 'call_heavy'])
+                st.metric("Bullish", bullish)
+            with col3:
+                bearish = len(hc_df[hc_df['direction'] == 'put_heavy'])
+                st.metric("Bearish", bearish)
+            with col4:
+                avg_score = hc_df['high_conviction_score'].mean()
+                st.metric("Avg Greeks Score", f"{avg_score:.1f}/4")
+    else:
+        # Show symbol-specific Greeks analysis
+        symbol_anomaly_data = get_symbol_anomaly_data(selected_symbol, selected_date)
+        
+        if symbol_anomaly_data:
+            create_greeks_symbol_analysis(selected_symbol, symbol_anomaly_data, selected_date)
+        else:
+            st.warning(f"No high conviction data for {selected_symbol} on {selected_date}")
+            create_basic_symbol_analysis(selected_symbol, selected_date)
+        
+        # Contracts and heatmaps
+        st.markdown("---")
+        create_contracts_table(selected_symbol, selected_date)
+        st.markdown("---")
+        create_options_heatmaps(selected_symbol, selected_date)
+
+
+def render_legacy_page(anomalies_df: pd.DataFrame, available_symbols: list):
+    """Render the legacy composite score interface."""
+    st.markdown("## Legacy Composite Score Alerts")
+    st.markdown("""
+    Original scoring system: Volume Anomaly + Volume:OI Ratio + OTM Concentration + Directional Bias + Time Pressure.
+    **Alert threshold**: Score >= 7.5/10.0, Magnitude >= $20K
+    """)
+    
+    # Symbol selection
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Symbol Selection")
+    
+    ordered_anomaly_symbols = get_ordered_anomaly_symbols(anomalies_df) if not anomalies_df.empty else []
+    other_symbols = sorted([s for s in available_symbols if s not in ordered_anomaly_symbols])
+    all_symbols = ['Overview'] + ordered_anomaly_symbols + other_symbols
+    
+    selected_symbol = st.session_state.get('legacy_selected_symbol', 'Overview')
+    if selected_symbol not in all_symbols:
+        selected_symbol = 'Overview'
+    
+    selected_symbol = st.sidebar.selectbox(
+        "Select Symbol",
+        all_symbols,
+        index=all_symbols.index(selected_symbol) if selected_symbol in all_symbols else 0,
+        key="legacy_selected_symbol"
+    )
+    
+    selected_date = None
+    if selected_symbol and selected_symbol != 'Overview':
+        selected_date = st.sidebar.date_input(
+            "Select Date",
+            value=date.today(),
+            max_value=date.today(),
+            key="legacy_date"
+        )
+        if st.sidebar.button("Back to Overview", key="legacy_back"):
+            st.session_state.legacy_selected_symbol = 'Overview'
+            st.rerun()
+    
+    # Main content
+    if selected_symbol == 'Overview':
         if not anomalies_df.empty:
             create_anomaly_summary_by_date(anomalies_df)
-            
-            # Performance matrix
             st.markdown("---")
             create_performance_matrix()
-            
         else:
-            st.info("No high-conviction anomalies detected in the past 7 days.")
-            st.markdown("""
-            ### What this means:
-            - Market activity is within normal statistical ranges
-            - No unusual insider trading patterns detected
-            - System is functioning correctly and monitoring continuously
-            
-            ### Next steps:
-            - Check back during or after market hours
-            - Anomalies are detected every 15 minutes during trading hours
-            - Email notifications are sent automatically when anomalies are found
-            """)
+            st.info("No anomalies detected meeting the threshold criteria.")
     else:
-        # Check if this symbol has anomalies for the selected date
         symbol_anomaly_data = get_symbol_anomaly_data(selected_symbol, selected_date)
         
         if symbol_anomaly_data:
             create_symbol_analysis(selected_symbol, symbol_anomaly_data, selected_date)
         else:
-            # Show basic symbol analysis without anomaly data
             create_basic_symbol_analysis(selected_symbol, selected_date)
         
-        # Add contracts table section
         st.markdown("---")
         create_contracts_table(selected_symbol, selected_date)
-        
-        # Add heatmaps section
         st.markdown("---")
         create_options_heatmaps(selected_symbol, selected_date)
     
     # Footer
     st.markdown("---")
     st.markdown("""
-    **System Status**: Active monitoring every 15 minutes during market hours  
-    **Alert Threshold**: Score ≥ 7.5/10.0 (high-conviction only)  
-    **Detection Method**: Statistical Z-score analysis vs 30-day baseline  
-    
-    *This system is for informational purposes only. Always conduct proper due diligence.*
+    **Detection Method**: Statistical Z-score analysis vs 90-day baseline  
+    **Alert Threshold**: Score >= 7.5/10.0, Magnitude >= $20K
     """)
+
 
 if __name__ == '__main__':
     main()
