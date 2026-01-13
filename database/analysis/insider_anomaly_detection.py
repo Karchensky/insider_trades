@@ -25,7 +25,7 @@ from database.core.connection import db
 logger = logging.getLogger(__name__)
 
 class InsiderAnomalyDetector:
-    def __init__(self, baseline_days: int = 30):
+    def __init__(self, baseline_days: int = 90):
         self.baseline_days = baseline_days
         # Use EST timezone for all date/time operations
         self.est_tz = pytz.timezone('US/Eastern')
@@ -279,7 +279,121 @@ class InsiderAnomalyDetector:
             return {}
         finally:
             conn.close()
+    
+    def _get_intraday_price_moves(self, symbols: List[str]) -> Dict[str, float]:
+        """
+        Get intraday price movement percentage for each symbol.
+        Used to detect bot-driven trades where stock already moved significantly.
+        
+        Returns dict mapping symbol to intraday % move (day_close-day_open)/day_open * 100
+        """
+        if not symbols:
+            return {}
+        
+        conn = db.connect()
+        try:
+            with conn.cursor() as cur:
+                # Get today's stock prices from temp_stock (intraday data)
+                # Use DISTINCT ON to get most recent record per symbol
+                cur.execute("""
+                    SELECT DISTINCT ON (symbol)
+                        symbol,
+                        CASE 
+                            WHEN day_open > 0 THEN ((day_close - day_open) / day_open) * 100
+                            ELSE 0
+                        END as intraday_pct
+                    FROM temp_stock
+                    WHERE symbol = ANY(%s)
+                    ORDER BY symbol, as_of_timestamp DESC
+                """, (symbols,))
+                
+                results = {}
+                for row in cur.fetchall():
+                    # Handle both dict-like (RealDictRow) and tuple access
+                    if hasattr(row, 'keys'):
+                        results[row['symbol']] = float(row['intraday_pct'] or 0)
+                    else:
+                        results[row[0]] = float(row[1] or 0)
+                
+                return results
+                
+        except Exception as e:
+            logger.warning(f"Failed to get intraday price moves: {e}")
+            return {}
+        finally:
+            conn.close()
 
+    # High Conviction Scoring Thresholds (93rd percentile from validation analysis)
+    # These are the optimal thresholds for +100% take profit strategy
+    HIGH_CONVICTION_THRESHOLDS = {
+        'theta': 0.1624,    # Absolute value of theta
+        'gamma': 0.4683,
+        'vega': 0.1326,
+        'otm_score': 1.4    # From the anomaly scoring system
+    }
+    
+    def _calculate_high_conviction_score(self, contracts: List[Dict], direction: str, otm_score: float) -> tuple:
+        """
+        Calculate high conviction score based on option Greeks.
+        
+        Returns tuple of (high_conviction_score, is_high_conviction, recommended_option)
+        
+        Scoring: Count of factors above 93rd percentile thresholds
+        - Theta >= 0.1624
+        - Gamma >= 0.4683
+        - Vega >= 0.1326
+        - OTM Score >= 1.4
+        
+        High conviction: score >= 3 (at least 3 of 4 factors)
+        """
+        # Filter contracts by direction and find the best option
+        if direction == 'call_heavy':
+            eligible_contracts = [c for c in contracts if c['contract_type'] == 'call']
+        elif direction == 'put_heavy':
+            eligible_contracts = [c for c in contracts if c['contract_type'] == 'put']
+        else:
+            eligible_contracts = contracts
+        
+        # Further filter by price range ($0.05-$5.00) and volume > 50
+        tradeable_contracts = [
+            c for c in eligible_contracts 
+            if 0.05 <= (c.get('session_close') or 0) <= 5.00 
+            and (c.get('session_volume') or 0) > 50
+        ]
+        
+        if not tradeable_contracts:
+            return (0, False, None)
+        
+        # Find the highest volume option among tradeable contracts
+        best_option = max(tradeable_contracts, key=lambda x: x.get('session_volume') or 0)
+        recommended_option = best_option.get('contract_ticker')
+        
+        # Calculate high conviction score based on Greeks of the best option
+        score = 0
+        
+        # Theta check (use absolute value)
+        theta = abs(float(best_option.get('greeks_theta') or 0))
+        if theta >= self.HIGH_CONVICTION_THRESHOLDS['theta']:
+            score += 1
+        
+        # Gamma check
+        gamma = float(best_option.get('greeks_gamma') or 0)
+        if gamma >= self.HIGH_CONVICTION_THRESHOLDS['gamma']:
+            score += 1
+        
+        # Vega check
+        vega = float(best_option.get('greeks_vega') or 0)
+        if vega >= self.HIGH_CONVICTION_THRESHOLDS['vega']:
+            score += 1
+        
+        # OTM Score check (from anomaly-level calculation)
+        if otm_score >= self.HIGH_CONVICTION_THRESHOLDS['otm_score']:
+            score += 1
+        
+        is_high_conviction = score >= 3
+        
+        return (score, is_high_conviction, recommended_option)
+    
     def _detect_high_conviction_insider_activity(self, data: List[Dict], baseline: Dict) -> Dict[str, Dict]:
         """
         NEW: High-conviction insider trading detection with 1-10 scoring.
@@ -300,6 +414,9 @@ class InsiderAnomalyDetector:
         
         # Get most recent open interest for all symbols in one query (performance optimization)
         symbols_list = list(symbol_data.keys())
+        
+        # Get intraday stock price movement for bot-driven detection
+        intraday_moves = self._get_intraday_price_moves(symbols_list)
         
         for symbol, contracts in symbol_data.items():
             # Calculate symbol-level metrics
@@ -393,12 +510,32 @@ class InsiderAnomalyDetector:
             # Round composite score for consistent comparison and storage
             rounded_composite_score = round(composite_score, 1)
             
+            # Determine direction for high conviction calculation
+            if call_volume > put_volume * 2:
+                direction = 'call_heavy'
+            elif put_volume > call_volume * 2:
+                direction = 'put_heavy'
+            else:
+                direction = 'mixed'
+            
+            # Calculate high conviction score based on option Greeks
+            high_conviction_score, is_high_conviction, recommended_option = self._calculate_high_conviction_score(
+                contracts, direction, otm_score
+            )
+            
+            # Get intraday price move for this symbol (for bot-driven detection)
+            intraday_price_move_pct = intraday_moves.get(symbol, 0.0)
+            
             # Store ALL scores in database for historical tracking
             anomaly_data = {
                 'symbol': symbol,
                 'composite_score': rounded_composite_score,
                 'total_volume': total_volume,  # Add total_volume at top level for email filtering
                 'total_magnitude': total_magnitude,  # Add total_magnitude for filtering
+                'intraday_price_move_pct': intraday_price_move_pct,  # For bot-driven detection
+                'high_conviction_score': high_conviction_score,  # New high conviction scoring (0-4)
+                'is_high_conviction': is_high_conviction,  # Score >= 3
+                'recommended_option': recommended_option,  # Best tradeable option ticker
                 'anomaly_types': ['insider_activity'] if rounded_composite_score >= 7.5 and total_magnitude >= 20000 else ['low_score_activity'],
                 'total_anomalies': 1,
                 'details': {
@@ -731,7 +868,7 @@ class InsiderAnomalyDetector:
                         logger.warning(f"Capped call/put ratio for {anomaly_data['symbol']}: {original_ratio:.2f} -> 9999.9999")
                     
                     
-                    # Prepare row data
+                    # Prepare row data (including new high conviction columns)
                     row_data = (
                         self.current_date,
                         anomaly_data['symbol'],
@@ -766,6 +903,9 @@ class InsiderAnomalyDetector:
                         details.get('call_magnitude', 0),  # call_magnitude
                         details.get('put_magnitude', 0),  # put_magnitude
                         details.get('total_magnitude', 0),  # total_magnitude
+                        anomaly_data.get('high_conviction_score', 0),  # NEW: high conviction score (0-4)
+                        anomaly_data.get('is_high_conviction', False),  # NEW: flag for score >= 3
+                        anomaly_data.get('recommended_option'),  # NEW: best tradeable option ticker
                         datetime.now(self.est_tz)
                     )
                     bulk_data.append(row_data)
@@ -783,6 +923,7 @@ class InsiderAnomalyDetector:
                         call_open_interest, put_open_interest, call_volume_oi_ratio, put_volume_oi_ratio,
                         call_volume_oi_z_score, put_volume_oi_z_score, call_volume_oi_avg, put_volume_oi_avg,
                         call_magnitude, put_magnitude, total_magnitude,
+                        high_conviction_score, is_high_conviction, recommended_option,
                         as_of_timestamp
                     ) VALUES %s
                     ON CONFLICT (event_date, symbol)
@@ -818,6 +959,9 @@ class InsiderAnomalyDetector:
                         call_magnitude = EXCLUDED.call_magnitude,
                         put_magnitude = EXCLUDED.put_magnitude,
                         total_magnitude = EXCLUDED.total_magnitude,
+                        high_conviction_score = EXCLUDED.high_conviction_score,
+                        is_high_conviction = EXCLUDED.is_high_conviction,
+                        recommended_option = EXCLUDED.recommended_option,
                         as_of_timestamp = EXCLUDED.as_of_timestamp,
                         updated_at = CURRENT_TIMESTAMP
                 """

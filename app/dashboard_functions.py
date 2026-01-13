@@ -105,10 +105,13 @@ def get_current_anomalies() -> pd.DataFrame:
                 open_interest,
                 call_magnitude,
                 put_magnitude,
-                total_magnitude
+                total_magnitude,
+                COALESCE(high_conviction_score, 0) as high_conviction_score,
+                COALESCE(is_high_conviction, false) as is_high_conviction,
+                recommended_option
             FROM daily_anomaly_snapshot
             WHERE total_score >= 7.5 AND total_magnitude >= 20000
-            ORDER BY total_score DESC, as_of_timestamp DESC
+            ORDER BY is_high_conviction DESC, total_score DESC, as_of_timestamp DESC
         """
         
         cur.execute(query)
@@ -1899,3 +1902,563 @@ def create_contracts_table(symbol: str, target_date: date = None) -> None:
         put_volume = contracts_df[contracts_df['contract_type'] == 'put']['volume'].sum()
         call_put_ratio = call_volume / put_volume if put_volume > 0 else float('inf')
         st.metric("Call/Put Ratio", f"{call_put_ratio:.2f}")
+
+
+# =============================================================================
+# HIGH CONVICTION GREEKS FUNCTIONS
+# =============================================================================
+
+# Thresholds from validated analysis (93rd percentile)
+HIGH_CONVICTION_THRESHOLDS = {
+    'theta': 0.1624,
+    'gamma': 0.4683,
+    'vega': 0.1326,
+    'otm_score': 1.4
+}
+
+
+@st.cache_data(ttl=300)
+def get_recommended_option_details(contract_ticker: str) -> Dict:
+    """Get Greeks and details for a recommended option."""
+    if not contract_ticker:
+        return {}
+    
+    conn = db.connect()
+    try:
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Try temp_option first (current data), then daily_option_snapshot
+        cur.execute("""
+            SELECT 
+                contract_ticker,
+                session_close as close_price,
+                session_volume as volume,
+                implied_volatility,
+                greeks_delta,
+                greeks_gamma,
+                greeks_theta,
+                greeks_vega,
+                open_interest
+            FROM temp_option
+            WHERE contract_ticker = %s
+            ORDER BY as_of_timestamp DESC
+            LIMIT 1
+        """, (contract_ticker,))
+        
+        row = cur.fetchone()
+        
+        if not row:
+            # Fallback to daily snapshot
+            cur.execute("""
+                SELECT 
+                    contract_ticker,
+                    close_price,
+                    volume,
+                    implied_volatility,
+                    greeks_delta,
+                    greeks_gamma,
+                    greeks_theta,
+                    greeks_vega,
+                    open_interest
+                FROM daily_option_snapshot
+                WHERE contract_ticker = %s
+                ORDER BY date DESC
+                LIMIT 1
+            """, (contract_ticker,))
+            row = cur.fetchone()
+        
+        return dict(row) if row else {}
+        
+    except Exception as e:
+        return {}
+    finally:
+        conn.close()
+
+
+def create_greeks_display(anomaly_data: Dict) -> None:
+    """Display Greeks information for high conviction alerts."""
+    
+    hc_score = anomaly_data.get('high_conviction_score', 0)
+    is_hc = anomaly_data.get('is_high_conviction', False)
+    recommended_option = anomaly_data.get('recommended_option', '')
+    otm_score = anomaly_data.get('otm_score', 0)
+    
+    if not is_hc and hc_score < 2:
+        return
+    
+    st.subheader("High Conviction Analysis")
+    
+    # Get option details
+    option_details = get_recommended_option_details(recommended_option) if recommended_option else {}
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        status = "HIGH CONVICTION" if is_hc else "Moderate Signal"
+        st.markdown(f"""
+        ### Greeks Score: **{hc_score}/4**
+        **{status}**
+        
+        **Recommended Option:**  
+        `{recommended_option if recommended_option else 'N/A'}`
+        """)
+        
+        if option_details:
+            price = option_details.get('close_price', 0)
+            volume = option_details.get('volume', 0)
+            st.markdown(f"""
+            - **Price**: ${float(price):.2f}
+            - **Volume**: {int(volume):,}
+            """)
+    
+    with col2:
+        # Greeks breakdown with threshold comparison
+        theta = abs(float(option_details.get('greeks_theta', 0) or 0))
+        gamma = float(option_details.get('greeks_gamma', 0) or 0)
+        vega = float(option_details.get('greeks_vega', 0) or 0)
+        
+        theta_pass = theta >= HIGH_CONVICTION_THRESHOLDS['theta']
+        gamma_pass = gamma >= HIGH_CONVICTION_THRESHOLDS['gamma']
+        vega_pass = vega >= HIGH_CONVICTION_THRESHOLDS['vega']
+        otm_pass = otm_score >= HIGH_CONVICTION_THRESHOLDS['otm_score']
+        
+        st.markdown("**Factor Breakdown (93rd percentile thresholds):**")
+        
+        factors_data = [
+            ("Theta", theta, HIGH_CONVICTION_THRESHOLDS['theta'], theta_pass),
+            ("Gamma", gamma, HIGH_CONVICTION_THRESHOLDS['gamma'], gamma_pass),
+            ("Vega", vega, HIGH_CONVICTION_THRESHOLDS['vega'], vega_pass),
+            ("OTM Score", otm_score, HIGH_CONVICTION_THRESHOLDS['otm_score'], otm_pass),
+        ]
+        
+        for name, value, threshold, passed in factors_data:
+            status_str = "[PASS]" if passed else "[FAIL]"
+            st.markdown(f"{status_str} **{name}**: {value:.4f} (threshold: {threshold})")
+    
+    # Additional Greeks info
+    if option_details:
+        st.markdown("---")
+        cols = st.columns(5)
+        
+        with cols[0]:
+            delta = option_details.get('greeks_delta', 0)
+            st.metric("Delta", f"{float(delta or 0):.4f}")
+        
+        with cols[1]:
+            st.metric("Gamma", f"{gamma:.4f}", 
+                     delta="PASS" if gamma_pass else "FAIL",
+                     delta_color="normal" if gamma_pass else "inverse")
+        
+        with cols[2]:
+            st.metric("Theta", f"{theta:.4f}",
+                     delta="PASS" if theta_pass else "FAIL",
+                     delta_color="normal" if theta_pass else "inverse")
+        
+        with cols[3]:
+            st.metric("Vega", f"{vega:.4f}",
+                     delta="PASS" if vega_pass else "FAIL",
+                     delta_color="normal" if vega_pass else "inverse")
+        
+        with cols[4]:
+            iv = option_details.get('implied_volatility', 0)
+            st.metric("IV", f"{float(iv or 0):.1%}")
+
+
+# =============================================================================
+# PERFORMANCE ANALYSIS PAGE
+# =============================================================================
+
+@st.cache_data(ttl=600)  # Cache for 10 minutes
+def get_performance_data() -> pd.DataFrame:
+    """Get historical anomaly data with option performance for analysis."""
+    conn = db.connect()
+    try:
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Get anomalies with their recommended options and subsequent performance
+        cur.execute("""
+            WITH base AS (
+                SELECT 
+                    a.symbol, a.event_date, a.direction,
+                    a.total_score, a.otm_score, a.total_magnitude,
+                    COALESCE(a.high_conviction_score, 0) as high_conviction_score,
+                    COALESCE(a.is_high_conviction, false) as is_high_conviction,
+                    a.recommended_option,
+                    COALESCE(a.is_bot_driven, false) as is_bot_driven,
+                    COALESCE(a.is_earnings_related, false) as is_earnings_related,
+                    o.close_price as entry_price,
+                    o.greeks_theta, o.greeks_gamma, o.greeks_vega, o.implied_volatility
+                FROM daily_anomaly_snapshot a
+                LEFT JOIN daily_option_snapshot o 
+                    ON a.recommended_option = o.contract_ticker 
+                    AND a.event_date = o.date
+                WHERE a.total_magnitude >= 20000
+                  AND a.event_date >= CURRENT_DATE - INTERVAL '90 days'
+                  AND a.event_date <= CURRENT_DATE - INTERVAL '10 days'
+            ),
+            price_agg AS (
+                SELECT 
+                    b.recommended_option,
+                    b.event_date,
+                    MAX(o_future.close_price) as max_price
+                FROM base b
+                INNER JOIN daily_option_snapshot o_future
+                    ON b.recommended_option = o_future.contract_ticker
+                    AND o_future.date > b.event_date
+                    AND o_future.date <= b.event_date + INTERVAL '10 days'
+                WHERE b.recommended_option IS NOT NULL
+                GROUP BY b.recommended_option, b.event_date
+            )
+            SELECT 
+                b.*,
+                p.max_price
+            FROM base b
+            LEFT JOIN price_agg p 
+                ON b.recommended_option = p.recommended_option 
+                AND b.event_date = p.event_date
+            ORDER BY b.event_date DESC
+        """)
+        
+        rows = cur.fetchall()
+        if not rows:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame([dict(row) for row in rows])
+        
+        # Calculate performance metrics
+        df['entry_price'] = pd.to_numeric(df['entry_price'], errors='coerce')
+        df['max_price'] = pd.to_numeric(df['max_price'], errors='coerce')
+        
+        # Calculate max ROI (if we sold at the peak)
+        df['max_roi'] = ((df['max_price'] - df['entry_price']) / df['entry_price'] * 100).fillna(0)
+        
+        # Did it hit +100% take profit?
+        df['hit_100_tp'] = df['max_price'] >= (df['entry_price'] * 2.0)
+        
+        # Did it hit +50% take profit?
+        df['hit_50_tp'] = df['max_price'] >= (df['entry_price'] * 1.5)
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error fetching performance data: {e}")
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+
+def create_performance_analysis_page() -> None:
+    """Create the performance analysis page."""
+    st.header("Algorithm Performance Analysis")
+    
+    st.markdown("""
+    Analysis of historical high conviction alerts and their option performance.
+    Based on +100% take profit strategy (sell when option doubles, otherwise hold to expiration).
+    """)
+    
+    # Get performance data
+    df = get_performance_data()
+    
+    if df.empty:
+        st.warning("No performance data available. Need at least 10 days of historical data.")
+        return
+    
+    # Filter out bot-driven and earnings-related
+    df_clean = df[
+        (df['is_bot_driven'] == False) & 
+        (df['is_earnings_related'] == False)
+    ].copy()
+    
+    st.markdown(f"**Data Range**: {df_clean['event_date'].min()} to {df_clean['event_date'].max()}")
+    st.markdown(f"**Total Alerts**: {len(df_clean)} (after filtering bot/earnings)")
+    
+    # Summary metrics
+    st.subheader("Overall Performance Summary")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # All alerts
+    total = len(df_clean)
+    hit_100 = df_clean['hit_100_tp'].sum()
+    hit_50 = df_clean['hit_50_tp'].sum()
+    
+    with col1:
+        st.metric("Total Alerts", total)
+    
+    with col2:
+        rate_100 = hit_100 / total * 100 if total > 0 else 0
+        st.metric("+100% Hit Rate", f"{rate_100:.1f}%", 
+                 delta=f"{hit_100} hits")
+    
+    with col3:
+        rate_50 = hit_50 / total * 100 if total > 0 else 0
+        st.metric("+50% Hit Rate", f"{rate_50:.1f}%",
+                 delta=f"{hit_50} hits")
+    
+    with col4:
+        avg_roi = df_clean['max_roi'].mean()
+        st.metric("Avg Max ROI", f"{avg_roi:.1f}%")
+    
+    # High Conviction vs All
+    st.markdown("---")
+    st.subheader("High Conviction (Score >= 3) vs All Alerts")
+    
+    df_hc = df_clean[df_clean['high_conviction_score'] >= 3]
+    df_not_hc = df_clean[df_clean['high_conviction_score'] < 3]
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### High Conviction Alerts")
+        hc_total = len(df_hc)
+        hc_hit_100 = df_hc['hit_100_tp'].sum()
+        hc_rate = hc_hit_100 / hc_total * 100 if hc_total > 0 else 0
+        
+        st.metric("Alerts", hc_total)
+        st.metric("+100% Hit Rate", f"{hc_rate:.1f}%", delta=f"{hc_hit_100} hits")
+        st.metric("Avg Max ROI", f"{df_hc['max_roi'].mean():.1f}%" if hc_total > 0 else "N/A")
+    
+    with col2:
+        st.markdown("### Other Alerts (Score < 3)")
+        other_total = len(df_not_hc)
+        other_hit_100 = df_not_hc['hit_100_tp'].sum()
+        other_rate = other_hit_100 / other_total * 100 if other_total > 0 else 0
+        
+        st.metric("Alerts", other_total)
+        st.metric("+100% Hit Rate", f"{other_rate:.1f}%", delta=f"{other_hit_100} hits")
+        st.metric("Avg Max ROI", f"{df_not_hc['max_roi'].mean():.1f}%" if other_total > 0 else "N/A")
+    
+    # Lift calculation
+    if other_rate > 0 and hc_rate > 0:
+        lift = hc_rate / other_rate
+        st.markdown(f"**Lift**: High conviction alerts are **{lift:.2f}x** more likely to hit +100%")
+    
+    # Score breakdown
+    st.markdown("---")
+    st.subheader("Performance by Greeks Score")
+    
+    score_data = []
+    for score in range(5):
+        subset = df_clean[df_clean['high_conviction_score'] == score]
+        if len(subset) > 0:
+            score_data.append({
+                'Score': score,
+                'Alerts': len(subset),
+                '+100% Hits': subset['hit_100_tp'].sum(),
+                'Hit Rate': f"{subset['hit_100_tp'].sum() / len(subset) * 100:.1f}%",
+                'Avg Max ROI': f"{subset['max_roi'].mean():.1f}%"
+            })
+    
+    if score_data:
+        score_df = pd.DataFrame(score_data)
+        st.dataframe(score_df, use_container_width=True, hide_index=True)
+    
+    # Visualization
+    st.markdown("---")
+    st.subheader("Hit Rate by Score")
+    
+    if score_data:
+        import plotly.express as px
+        
+        viz_data = []
+        for score in range(5):
+            subset = df_clean[df_clean['high_conviction_score'] == score]
+            if len(subset) > 0:
+                viz_data.append({
+                    'Score': str(score),
+                    'Hit Rate': subset['hit_100_tp'].sum() / len(subset) * 100,
+                    'Count': len(subset)
+                })
+        
+        if viz_data:
+            viz_df = pd.DataFrame(viz_data)
+            
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=viz_df['Score'],
+                y=viz_df['Hit Rate'],
+                text=viz_df['Count'].apply(lambda x: f'n={x}'),
+                textposition='outside',
+                marker_color=['#ff6b6b' if int(s) < 3 else '#51cf66' for s in viz_df['Score']]
+            ))
+            
+            fig.add_hline(y=50, line_dash="dash", line_color="green", 
+                         annotation_text="Break-even (50%)")
+            
+            fig.update_layout(
+                title="Hit Rate by Greeks Score",
+                xaxis_title="Greeks Score",
+                yaxis_title="+100% Hit Rate (%)",
+                yaxis_range=[0, 100]
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Recent high conviction alerts
+    st.markdown("---")
+    st.subheader("Recent High Conviction Alerts")
+    
+    recent_hc = df_hc.head(20)[['event_date', 'symbol', 'direction', 'high_conviction_score', 
+                                'entry_price', 'max_price', 'max_roi', 'hit_100_tp']].copy()
+    
+    if not recent_hc.empty:
+        recent_hc['entry_price'] = recent_hc['entry_price'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+        recent_hc['max_price'] = recent_hc['max_price'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+        recent_hc['max_roi'] = recent_hc['max_roi'].apply(lambda x: f"{x:.1f}%")
+        recent_hc['hit_100_tp'] = recent_hc['hit_100_tp'].apply(lambda x: "YES" if x else "NO")
+        recent_hc['direction'] = recent_hc['direction'].apply(
+            lambda x: "BULLISH" if x == 'call_heavy' else "BEARISH" if x == 'put_heavy' else x
+        )
+        
+        recent_hc.columns = ['Date', 'Symbol', 'Direction', 'Score', 'Entry', 'Max Price', 'Max ROI', 'Hit +100%']
+        st.dataframe(recent_hc, use_container_width=True, hide_index=True)
+    else:
+        st.info("No high conviction alerts in the analysis period.")
+
+
+# =============================================================================
+# GREEKS-BASED SYMBOL ANALYSIS
+# =============================================================================
+
+@st.cache_data(ttl=300)
+def get_high_conviction_anomalies() -> pd.DataFrame:
+    """Get only high conviction anomalies."""
+    conn = db.connect()
+    try:
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        cur.execute("""
+            SELECT 
+                symbol, event_date, direction,
+                total_score, otm_score, total_magnitude,
+                high_conviction_score, is_high_conviction, recommended_option
+            FROM daily_anomaly_snapshot
+            WHERE is_high_conviction = TRUE
+              AND total_magnitude >= 20000
+            ORDER BY event_date DESC, high_conviction_score DESC
+        """)
+        
+        rows = cur.fetchall()
+        return pd.DataFrame([dict(row) for row in rows]) if rows else pd.DataFrame()
+        
+    except Exception as e:
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+
+def create_greeks_symbol_analysis(symbol: str, anomaly_data: Dict, selected_date: date = None) -> None:
+    """Create Greeks-focused analysis for a specific symbol."""
+    st.header(f"Greeks Analysis: {symbol}")
+    
+    # Get historical data
+    history = get_symbol_history(symbol)
+    
+    if history['stock'].empty:
+        st.warning(f"No historical data available for {symbol}")
+        return
+    
+    details = anomaly_data.get('details', {})
+    
+    # High conviction header info
+    hc_score = details.get('high_conviction_score', 0)
+    is_hc = details.get('is_high_conviction', False)
+    recommended_option = details.get('recommended_option', '')
+    direction = details.get('direction', '')
+    
+    # Direction and score
+    dir_display = "BULLISH" if direction == 'call_heavy' else "BEARISH" if direction == 'put_heavy' else direction
+    status = "HIGH CONVICTION" if is_hc else "Below Threshold"
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Greeks Score", f"{hc_score}/4")
+    with col2:
+        st.metric("Status", status)
+    with col3:
+        st.metric("Direction", dir_display)
+    with col4:
+        magnitude = details.get('total_magnitude', 0)
+        st.metric("Magnitude", f"${magnitude:,.0f}")
+    
+    # Recommended option section
+    st.markdown("---")
+    st.subheader("Recommended Option")
+    
+    if recommended_option:
+        option_details = get_recommended_option_details(recommended_option)
+        
+        if option_details:
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            with col1:
+                st.metric("Contract", recommended_option)
+            with col2:
+                price = float(option_details.get('close_price', 0) or 0)
+                st.metric("Price", f"${price:.2f}")
+            with col3:
+                volume = int(option_details.get('volume', 0) or 0)
+                st.metric("Volume", f"{volume:,}")
+            with col4:
+                iv = float(option_details.get('implied_volatility', 0) or 0)
+                st.metric("IV", f"{iv:.1%}")
+            with col5:
+                oi = int(option_details.get('open_interest', 0) or 0)
+                st.metric("Open Interest", f"{oi:,}")
+            
+            # Greeks breakdown
+            st.markdown("---")
+            st.subheader("Greeks Factor Analysis")
+            
+            theta = abs(float(option_details.get('greeks_theta', 0) or 0))
+            gamma = float(option_details.get('greeks_gamma', 0) or 0)
+            vega = float(option_details.get('greeks_vega', 0) or 0)
+            delta = float(option_details.get('greeks_delta', 0) or 0)
+            otm_score = details.get('otm_score', 0)
+            
+            theta_pass = theta >= HIGH_CONVICTION_THRESHOLDS['theta']
+            gamma_pass = gamma >= HIGH_CONVICTION_THRESHOLDS['gamma']
+            vega_pass = vega >= HIGH_CONVICTION_THRESHOLDS['vega']
+            otm_pass = otm_score >= HIGH_CONVICTION_THRESHOLDS['otm_score']
+            
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            with col1:
+                st.metric("Delta", f"{delta:.4f}")
+            
+            with col2:
+                st.metric("Theta", f"{theta:.4f}",
+                         delta="PASS" if theta_pass else "FAIL",
+                         delta_color="normal" if theta_pass else "inverse")
+            
+            with col3:
+                st.metric("Gamma", f"{gamma:.4f}",
+                         delta="PASS" if gamma_pass else "FAIL",
+                         delta_color="normal" if gamma_pass else "inverse")
+            
+            with col4:
+                st.metric("Vega", f"{vega:.4f}",
+                         delta="PASS" if vega_pass else "FAIL",
+                         delta_color="normal" if vega_pass else "inverse")
+            
+            with col5:
+                st.metric("OTM Score", f"{otm_score:.2f}",
+                         delta="PASS" if otm_pass else "FAIL",
+                         delta_color="normal" if otm_pass else "inverse")
+            
+            # Thresholds reference
+            st.markdown("""
+            **Thresholds (93rd percentile):** 
+            Theta >= 0.1624 | Gamma >= 0.4683 | Vega >= 0.1326 | OTM Score >= 1.4
+            """)
+        else:
+            st.warning(f"Could not fetch details for {recommended_option}")
+    else:
+        st.info("No recommended option available")
+    
+    # Price chart
+    st.markdown("---")
+    create_combined_price_volume_chart(history['stock'], symbol)
