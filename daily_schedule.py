@@ -36,6 +36,7 @@ try:
     from scrapers.earnings_calendar_scraper import (
         EarningsCalendarScraper, 
         update_intraday_price_flags, 
+        update_earnings_proximity_flags,
         update_actionability_flags
     )
     EARNINGS_AVAILABLE = True
@@ -308,12 +309,16 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
 
     # Step: Fetch earnings calendar data (if available)
     if EARNINGS_AVAILABLE:
-        # Step: Update actionability flags (intraday price movement, bot detection)
+        # Step: Update actionability flags (intraday price movement, bot detection, earnings)
         logger.info("[actionability] Updating intraday price flags for anomalies...")
         try:
             # Update intraday price movement and is_bot_driven flag (threshold: 5%)
             intraday_result = update_intraday_price_flags(days_back=retention_days, threshold_pct=5.0)
             logger.info(f"[actionability] Updated intraday flags for {intraday_result.get('records_updated', 0)} records")
+            
+            # Update earnings proximity flags (4-day window)
+            earnings_result = update_earnings_proximity_flags(days_back=retention_days, earnings_window_days=4)
+            logger.info(f"[actionability] Updated earnings flags for {earnings_result.get('records_updated', 0)} records")
             
             # Calculate final actionability
             actionability_result = update_actionability_flags(days_back=retention_days)

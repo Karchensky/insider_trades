@@ -336,7 +336,7 @@ class InsiderAnomalyDetector:
         """
         Calculate high conviction score based on option Greeks.
         
-        Returns tuple of (high_conviction_score, is_high_conviction, recommended_option)
+        Returns tuple of (high_conviction_score, is_high_conviction, recommended_option, component_flags, greek_values)
         
         Scoring: Count of factors above 93rd percentile thresholds
         - Theta >= 0.1624
@@ -361,8 +361,9 @@ class InsiderAnomalyDetector:
             and (c.get('session_volume') or 0) > 50
         ]
         
+        empty_result = (0, False, None, {'theta': False, 'gamma': False, 'vega': False, 'otm': False}, {})
         if not tradeable_contracts:
-            return (0, False, None)
+            return empty_result
         
         # Find the highest volume option among tradeable contracts
         best_option = max(tradeable_contracts, key=lambda x: x.get('session_volume') or 0)
@@ -370,29 +371,64 @@ class InsiderAnomalyDetector:
         
         # Calculate high conviction score based on Greeks of the best option
         score = 0
+        component_flags = {}
+        greek_values = {}
+        
+        # Helper function to calculate percentile (approximate)
+        def calc_percentile(value: float, threshold: float) -> float:
+            """Calculate approximate percentile. Threshold = 93rd percentile."""
+            if value <= 0:
+                return 0.0
+            if value >= threshold:
+                # Above threshold: scale from 93-100
+                pct = 93.0 + min(((value - threshold) / threshold) * 7.0, 7.0)
+            else:
+                # Below threshold: scale from 0-93
+                pct = (value / threshold) * 93.0
+            return round(pct, 2)
         
         # Theta check (use absolute value)
         theta = abs(float(best_option.get('greeks_theta') or 0))
-        if theta >= self.HIGH_CONVICTION_THRESHOLDS['theta']:
+        theta_met = theta >= self.HIGH_CONVICTION_THRESHOLDS['theta']
+        theta_pct = calc_percentile(theta, self.HIGH_CONVICTION_THRESHOLDS['theta'])
+        component_flags['theta'] = theta_met
+        greek_values['theta'] = theta
+        greek_values['theta_percentile'] = theta_pct
+        if theta_met:
             score += 1
         
         # Gamma check
         gamma = float(best_option.get('greeks_gamma') or 0)
-        if gamma >= self.HIGH_CONVICTION_THRESHOLDS['gamma']:
+        gamma_met = gamma >= self.HIGH_CONVICTION_THRESHOLDS['gamma']
+        gamma_pct = calc_percentile(gamma, self.HIGH_CONVICTION_THRESHOLDS['gamma'])
+        component_flags['gamma'] = gamma_met
+        greek_values['gamma'] = gamma
+        greek_values['gamma_percentile'] = gamma_pct
+        if gamma_met:
             score += 1
         
         # Vega check
         vega = float(best_option.get('greeks_vega') or 0)
-        if vega >= self.HIGH_CONVICTION_THRESHOLDS['vega']:
+        vega_met = vega >= self.HIGH_CONVICTION_THRESHOLDS['vega']
+        vega_pct = calc_percentile(vega, self.HIGH_CONVICTION_THRESHOLDS['vega'])
+        component_flags['vega'] = vega_met
+        greek_values['vega'] = vega
+        greek_values['vega_percentile'] = vega_pct
+        if vega_met:
             score += 1
         
         # OTM Score check (from anomaly-level calculation)
-        if otm_score >= self.HIGH_CONVICTION_THRESHOLDS['otm_score']:
+        otm_met = otm_score >= self.HIGH_CONVICTION_THRESHOLDS['otm_score']
+        otm_pct = calc_percentile(otm_score, self.HIGH_CONVICTION_THRESHOLDS['otm_score'])
+        component_flags['otm'] = otm_met
+        greek_values['otm'] = otm_score
+        greek_values['otm_percentile'] = otm_pct
+        if otm_met:
             score += 1
         
         is_high_conviction = score >= 3
         
-        return (score, is_high_conviction, recommended_option)
+        return (score, is_high_conviction, recommended_option, component_flags, greek_values)
     
     def _detect_high_conviction_insider_activity(self, data: List[Dict], baseline: Dict) -> Dict[str, Dict]:
         """
@@ -519,7 +555,7 @@ class InsiderAnomalyDetector:
                 direction = 'mixed'
             
             # Calculate high conviction score based on option Greeks
-            high_conviction_score, is_high_conviction, recommended_option = self._calculate_high_conviction_score(
+            high_conviction_score, is_high_conviction, recommended_option, component_flags, greek_values = self._calculate_high_conviction_score(
                 contracts, direction, otm_score
             )
             
@@ -536,6 +572,18 @@ class InsiderAnomalyDetector:
                 'high_conviction_score': high_conviction_score,  # New high conviction scoring (0-4)
                 'is_high_conviction': is_high_conviction,  # Score >= 3
                 'recommended_option': recommended_option,  # Best tradeable option ticker
+                'greeks_theta_met': component_flags.get('theta', False),  # Individual greek components
+                'greeks_gamma_met': component_flags.get('gamma', False),
+                'greeks_vega_met': component_flags.get('vega', False),
+                'greeks_otm_met': component_flags.get('otm', False),
+                'greeks_theta_value': greek_values.get('theta'),  # Actual greek values
+                'greeks_gamma_value': greek_values.get('gamma'),
+                'greeks_vega_value': greek_values.get('vega'),
+                'greeks_otm_value': greek_values.get('otm'),
+                'greeks_theta_percentile': greek_values.get('theta_percentile'),  # Percentiles (0-100)
+                'greeks_gamma_percentile': greek_values.get('gamma_percentile'),
+                'greeks_vega_percentile': greek_values.get('vega_percentile'),
+                'greeks_otm_percentile': greek_values.get('otm_percentile'),
                 'anomaly_types': ['insider_activity'] if rounded_composite_score >= 7.5 and total_magnitude >= 20000 else ['low_score_activity'],
                 'total_anomalies': 1,
                 'details': {
@@ -570,9 +618,18 @@ class InsiderAnomalyDetector:
             # Collect all anomaly data for bulk processing
             all_anomaly_data.append(anomaly_data)
             
-            # Only flag high-conviction cases (score >= 7.5 AND magnitude >= $20,000) for notifications
-            if rounded_composite_score >= 7.5 and total_magnitude >= 20000:
+            # Flag for notifications: EITHER greeks-based high conviction OR legacy high score (both need sufficient magnitude)
+            # Greeks-based (score >= 3/4) OR legacy composite (score >= 7.5) - both require $20K+ magnitude
+            meets_greeks_threshold = is_high_conviction  # Greeks score >= 3
+            meets_legacy_threshold = rounded_composite_score >= 7.5
+            meets_magnitude_threshold = total_magnitude >= 20000
+            
+            if (meets_greeks_threshold or meets_legacy_threshold) and meets_magnitude_threshold:
                 high_conviction_symbols[symbol] = anomaly_data
+                if meets_greeks_threshold:
+                    logger.debug(f"[ALERT CANDIDATE] {symbol}: Greeks {high_conviction_score}/4 (high_conviction)")
+                if meets_legacy_threshold:
+                    logger.debug(f"[ALERT CANDIDATE] {symbol}: Legacy {rounded_composite_score}/10")
         
         # Bulk store all anomaly data
         if all_anomaly_data:
@@ -906,6 +963,18 @@ class InsiderAnomalyDetector:
                         anomaly_data.get('high_conviction_score', 0),  # NEW: high conviction score (0-4)
                         anomaly_data.get('is_high_conviction', False),  # NEW: flag for score >= 3
                         anomaly_data.get('recommended_option'),  # NEW: best tradeable option ticker
+                        anomaly_data.get('greeks_theta_met', False),  # NEW: individual component flags
+                        anomaly_data.get('greeks_gamma_met', False),
+                        anomaly_data.get('greeks_vega_met', False),
+                        anomaly_data.get('greeks_otm_met', False),
+                        anomaly_data.get('greeks_theta_value'),  # NEW: actual greek values
+                        anomaly_data.get('greeks_gamma_value'),
+                        anomaly_data.get('greeks_vega_value'),
+                        anomaly_data.get('greeks_otm_value'),
+                        anomaly_data.get('greeks_theta_percentile'),  # NEW: percentiles (0-100)
+                        anomaly_data.get('greeks_gamma_percentile'),
+                        anomaly_data.get('greeks_vega_percentile'),
+                        anomaly_data.get('greeks_otm_percentile'),
                         datetime.now(self.est_tz)
                     )
                     bulk_data.append(row_data)
@@ -924,6 +993,9 @@ class InsiderAnomalyDetector:
                         call_volume_oi_z_score, put_volume_oi_z_score, call_volume_oi_avg, put_volume_oi_avg,
                         call_magnitude, put_magnitude, total_magnitude,
                         high_conviction_score, is_high_conviction, recommended_option,
+                        greeks_theta_met, greeks_gamma_met, greeks_vega_met, greeks_otm_met,
+                        greeks_theta_value, greeks_gamma_value, greeks_vega_value, greeks_otm_value,
+                        greeks_theta_percentile, greeks_gamma_percentile, greeks_vega_percentile, greeks_otm_percentile,
                         as_of_timestamp
                     ) VALUES %s
                     ON CONFLICT (event_date, symbol)
@@ -962,6 +1034,18 @@ class InsiderAnomalyDetector:
                         high_conviction_score = EXCLUDED.high_conviction_score,
                         is_high_conviction = EXCLUDED.is_high_conviction,
                         recommended_option = EXCLUDED.recommended_option,
+                        greeks_theta_met = EXCLUDED.greeks_theta_met,
+                        greeks_gamma_met = EXCLUDED.greeks_gamma_met,
+                        greeks_vega_met = EXCLUDED.greeks_vega_met,
+                        greeks_otm_met = EXCLUDED.greeks_otm_met,
+                        greeks_theta_value = EXCLUDED.greeks_theta_value,
+                        greeks_gamma_value = EXCLUDED.greeks_gamma_value,
+                        greeks_vega_value = EXCLUDED.greeks_vega_value,
+                        greeks_otm_value = EXCLUDED.greeks_otm_value,
+                        greeks_theta_percentile = EXCLUDED.greeks_theta_percentile,
+                        greeks_gamma_percentile = EXCLUDED.greeks_gamma_percentile,
+                        greeks_vega_percentile = EXCLUDED.greeks_vega_percentile,
+                        greeks_otm_percentile = EXCLUDED.greeks_otm_percentile,
                         as_of_timestamp = EXCLUDED.as_of_timestamp,
                         updated_at = CURRENT_TIMESTAMP
                 """

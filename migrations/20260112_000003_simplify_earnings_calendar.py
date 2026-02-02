@@ -52,8 +52,10 @@ def up():
                 print(f"[OK] Dropped column: {col}")
             
             # Recreate simplified view
+            # SECURITY INVOKER ensures RLS policies apply to querying user, not view creator
             cur.execute("""
-                CREATE OR REPLACE VIEW upcoming_earnings AS
+                CREATE OR REPLACE VIEW upcoming_earnings
+                WITH (security_invoker = true) AS
                 SELECT 
                     symbol,
                     earnings_date,

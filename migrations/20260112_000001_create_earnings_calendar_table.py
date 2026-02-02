@@ -4,7 +4,7 @@ Date: 2026-01-12
 Purpose: Store earnings announcement dates to filter false positive anomalies
 
 This table stores upcoming and historical earnings dates fetched from the Benzinga API
-via Massive. Used to identify and flag anomalies that occur 1-3 days before earnings,
+via Massive. Used to identify and flag anomalies that occur 1-4 days before earnings,
 which are likely to be pre-earnings positioning rather than insider trading.
 """
 
@@ -98,8 +98,10 @@ def up():
             print("[OK] Created get_earnings_proximity function")
             
             # Create view for symbols with upcoming earnings
+            # SECURITY INVOKER ensures RLS policies apply to querying user, not view creator
             cur.execute("""
-                CREATE OR REPLACE VIEW upcoming_earnings AS
+                CREATE OR REPLACE VIEW upcoming_earnings 
+                WITH (security_invoker = true) AS
                 SELECT 
                     symbol,
                     earnings_date,
