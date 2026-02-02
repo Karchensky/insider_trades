@@ -40,7 +40,7 @@ def up():
             """)
             print("[OK] Added intraday_price_move_pct column")
             
-            # Add is_earnings_related - flag for triggers within 3 days of earnings
+            # Add is_earnings_related - flag for triggers within 4 days of earnings
             cur.execute("""
                 ALTER TABLE daily_anomaly_snapshot 
                 ADD COLUMN IF NOT EXISTS is_earnings_related BOOLEAN DEFAULT FALSE;
@@ -72,7 +72,7 @@ def up():
             """)
             cur.execute("""
                 COMMENT ON COLUMN daily_anomaly_snapshot.is_earnings_related IS 
-                'True if trigger occurred within 3 days of an earnings announcement';
+                'True if trigger occurred within 4 days of an earnings announcement';
             """)
             cur.execute("""
                 COMMENT ON COLUMN daily_anomaly_snapshot.is_bot_driven IS 

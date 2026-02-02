@@ -1402,8 +1402,8 @@ class BulkStockDataLoader:
         
         This updates: implied_volatility, greeks_delta, greeks_gamma, greeks_theta, greeks_vega
         
-        Logic: Find the most recent temp_option data where DATE(as_of_timestamp) = target_date
-        This ensures we're using intraday data from the same trading day as the daily snapshot.
+        Logic: Match by contract_ticker regardless of timestamp date, using most recent temp_option data.
+        This handles cases where daily_schedule runs the next day and needs yesterday's data.
         """
         start = time.time()
         conn = db.connect()
@@ -1419,8 +1419,7 @@ class BulkStockDataLoader:
                     greeks_vega = temp.greeks_vega,
                     updated_at = CURRENT_TIMESTAMP
                 FROM (
-                    SELECT DISTINCT ON (symbol, contract_ticker)
-                        symbol,
+                    SELECT DISTINCT ON (contract_ticker)
                         contract_ticker,
                         implied_volatility,
                         greeks_delta,
@@ -1428,13 +1427,13 @@ class BulkStockDataLoader:
                         greeks_theta,
                         greeks_vega
                     FROM temp_option
-                    WHERE DATE(as_of_timestamp) = %s
-                    ORDER BY symbol, contract_ticker, as_of_timestamp DESC
+                    ORDER BY contract_ticker, as_of_timestamp DESC
                 ) temp
                 WHERE dos.date = %s
-                  AND dos.contract_ticker = temp.contract_ticker;
+                  AND dos.contract_ticker = temp.contract_ticker
+                  AND temp.implied_volatility IS NOT NULL;
                 """,
-                (target_date, target_date)
+                (target_date,)
             )
             affected = cursor.rowcount or 0
             conn.commit()

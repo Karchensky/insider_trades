@@ -200,6 +200,52 @@ def update_intraday_price_flags(days_back: int = 30, threshold_pct: float = 5.0)
         conn.close()
 
 
+def update_earnings_proximity_flags(days_back: int = 30, earnings_window_days: int = 4) -> Dict[str, Any]:
+    """
+    Update earnings_proximity_days and is_earnings_related flags.
+    
+    Args:
+        days_back: How many days of anomalies to update
+        earnings_window_days: Triggers within this many days of earnings are marked as earnings-related (default: 4)
+    """
+    conn = db.connect()
+    try:
+        with conn.cursor() as cur:
+            # Update earnings_proximity_days using the get_earnings_proximity function
+            cur.execute("""
+                UPDATE daily_anomaly_snapshot
+                SET 
+                    earnings_proximity_days = get_earnings_proximity(symbol, event_date),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE event_date >= CURRENT_DATE - INTERVAL %s
+            """, (f'{days_back} days',))
+            
+            # Update is_earnings_related flag based on proximity
+            cur.execute("""
+                UPDATE daily_anomaly_snapshot
+                SET 
+                    is_earnings_related = CASE 
+                        WHEN earnings_proximity_days IS NOT NULL 
+                             AND earnings_proximity_days >= 0 
+                             AND earnings_proximity_days <= %s
+                        THEN TRUE
+                        ELSE FALSE
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE event_date >= CURRENT_DATE - INTERVAL %s
+            """, (earnings_window_days, f'{days_back} days'))
+            
+            updated = cur.rowcount
+            conn.commit()
+            return {'success': True, 'records_updated': updated}
+            
+    except Exception as e:
+        conn.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        conn.close()
+
+
 def update_actionability_flags(days_back: int = 30) -> Dict[str, Any]:
     """
     Update is_actionable flag.
@@ -240,6 +286,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Earnings Calendar Scraper')
     parser.add_argument('--days-back', type=int, default=30)
     parser.add_argument('--intraday-threshold', type=float, default=5.0)
+    parser.add_argument('--earnings-window', type=int, default=4, help='Days before earnings to flag as earnings-related (default: 4)')
     parser.add_argument('--max-symbols', type=int, default=100)
     args = parser.parse_args()
     
@@ -247,6 +294,11 @@ if __name__ == '__main__':
     print("Updating intraday price flags...")
     result1 = update_intraday_price_flags(args.days_back, args.intraday_threshold)
     print(f"  Updated: {result1.get('records_updated', 0)}")
+    
+    # Update earnings proximity flags
+    print(f"Updating earnings proximity flags (window: {args.earnings_window} days)...")
+    result_earnings = update_earnings_proximity_flags(args.days_back, args.earnings_window)
+    print(f"  Updated: {result_earnings.get('records_updated', 0)}")
     
     # Update actionability
     print("Updating actionability flags...")
