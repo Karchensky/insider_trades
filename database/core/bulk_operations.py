@@ -1398,12 +1398,12 @@ class BulkStockDataLoader:
     def update_daily_option_snapshot_greeks_and_iv_from_temp(self, target_date: str) -> Dict[str, Any]:
         """
         For a given date, update the Greeks and implied volatility columns in daily_option_snapshot
-        with the latest data from temp_option.
+        with the latest data from temp_option FOR THAT SPECIFIC DATE.
         
         This updates: implied_volatility, greeks_delta, greeks_gamma, greeks_theta, greeks_vega
         
-        Logic: Match by contract_ticker regardless of timestamp date, using most recent temp_option data.
-        This handles cases where daily_schedule runs the next day and needs yesterday's data.
+        Logic: Match by contract_ticker AND date to ensure greeks from 1/30 go into 1/30 snapshot,
+        not mixed with 2/2 data.
         """
         start = time.time()
         conn = db.connect()
@@ -1427,13 +1427,14 @@ class BulkStockDataLoader:
                         greeks_theta,
                         greeks_vega
                     FROM temp_option
+                    WHERE DATE(as_of_timestamp) = %s
                     ORDER BY contract_ticker, as_of_timestamp DESC
                 ) temp
                 WHERE dos.date = %s
                   AND dos.contract_ticker = temp.contract_ticker
                   AND temp.implied_volatility IS NOT NULL;
                 """,
-                (target_date,)
+                (target_date, target_date)
             )
             affected = cursor.rowcount or 0
             conn.commit()
