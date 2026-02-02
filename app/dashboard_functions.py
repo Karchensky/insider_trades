@@ -586,7 +586,7 @@ def create_anomaly_summary_by_date(anomalies_df: pd.DataFrame) -> None:
         st.markdown("---")
 
 def create_symbol_analysis(symbol: str, anomaly_data: Dict, selected_date: date = None) -> None:
-    """Create detailed analysis for a specific symbol."""
+    """Create comprehensive analysis for a specific symbol (Greeks + Legacy)."""
     st.header(f"Deep Dive Analysis: {symbol}")
     
     # Get historical data
@@ -596,8 +596,90 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict, selected_date: date 
         st.warning(f"No historical data available for {symbol}")
         return
     
-    # Score breakdown
     details = anomaly_data.get('details', {})
+    
+    # Greeks Score Section (if available)
+    hc_score = details.get('high_conviction_score', 0)
+    is_hc = details.get('is_high_conviction', False)
+    
+    if hc_score > 0 or is_hc:
+        st.subheader("Greeks-Based High Conviction Scoring")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Greeks Score", f"{hc_score}/4", help="Requires 3/4 factors at 93rd percentile")
+        with col2:
+            status = "HIGH CONVICTION" if is_hc else "Below Threshold"
+            st.metric("Status", status)
+        with col3:
+            direction = details.get('direction', '')
+            dir_display = "BULLISH" if direction == 'call_heavy' else "BEARISH" if direction == 'put_heavy' else direction.upper()
+            st.metric("Direction", dir_display)
+        with col4:
+            magnitude = details.get('total_magnitude', 0)
+            st.metric("Magnitude", f"${magnitude:,.0f}")
+        
+        # Greek components breakdown
+        st.markdown("**Greeks Components:**")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            theta_met = details.get('greeks_theta_met', False)
+            theta_val = details.get('greeks_theta_value', 0)
+            theta_pct = details.get('greeks_theta_percentile', 0)
+            status_icon = "✅" if theta_met else "❌"
+            st.metric(
+                f"Theta {status_icon}",
+                f"{theta_val:.4f}",
+                delta=f"{theta_pct:.0f}th percentile",
+                help="Threshold: 0.1624 (93rd percentile)"
+            )
+        
+        with col2:
+            gamma_met = details.get('greeks_gamma_met', False)
+            gamma_val = details.get('greeks_gamma_value', 0)
+            gamma_pct = details.get('greeks_gamma_percentile', 0)
+            status_icon = "✅" if gamma_met else "❌"
+            st.metric(
+                f"Gamma {status_icon}",
+                f"{gamma_val:.4f}",
+                delta=f"{gamma_pct:.0f}th percentile",
+                help="Threshold: 0.4683 (93rd percentile)"
+            )
+        
+        with col3:
+            vega_met = details.get('greeks_vega_met', False)
+            vega_val = details.get('greeks_vega_value', 0)
+            vega_pct = details.get('greeks_vega_percentile', 0)
+            status_icon = "✅" if vega_met else "❌"
+            st.metric(
+                f"Vega {status_icon}",
+                f"{vega_val:.4f}",
+                delta=f"{vega_pct:.0f}th percentile",
+                help="Threshold: 0.1326 (93rd percentile)"
+            )
+        
+        with col4:
+            otm_met = details.get('greeks_otm_met', False)
+            otm_val = details.get('greeks_otm_value', 0)
+            otm_pct = details.get('greeks_otm_percentile', 0)
+            status_icon = "✅" if otm_met else "❌"
+            st.metric(
+                f"OTM Score {status_icon}",
+                f"{otm_val:.2f}",
+                delta=f"{otm_pct:.0f}th percentile",
+                help="Threshold: 1.4 (93rd percentile)"
+            )
+        
+        # Recommended option
+        recommended_option = details.get('recommended_option', '')
+        if recommended_option:
+            st.markdown(f"**Recommended Option:** `{recommended_option}`")
+        
+        st.markdown("---")
+    
+    # Legacy Score Breakdown
+    st.subheader("Legacy Composite Scoring")
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
@@ -1585,7 +1667,22 @@ def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, 
                 open_interest,
                 call_magnitude,
                 put_magnitude,
-                total_magnitude
+                total_magnitude,
+                COALESCE(high_conviction_score, 0) as high_conviction_score,
+                COALESCE(is_high_conviction, false) as is_high_conviction,
+                recommended_option,
+                greeks_theta_met,
+                greeks_gamma_met,
+                greeks_vega_met,
+                greeks_otm_met,
+                greeks_theta_value,
+                greeks_gamma_value,
+                greeks_vega_value,
+                greeks_otm_value,
+                greeks_theta_percentile,
+                greeks_gamma_percentile,
+                greeks_vega_percentile,
+                greeks_otm_percentile
             FROM daily_anomaly_snapshot
             WHERE symbol = %s AND event_date = %s
             ORDER BY as_of_timestamp DESC
@@ -1615,7 +1712,24 @@ def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, 
                 'call_multiplier': float(row.get('call_multiplier', 0)),
                 'current_open_interest': int(row.get('open_interest', 0)),
                 'pattern_description': row.get('pattern_description', 'Unusual trading pattern'),
-                'z_score': float(row.get('z_score', 0))
+                'z_score': float(row.get('z_score', 0)),
+                'high_conviction_score': int(row.get('high_conviction_score', 0)),
+                'is_high_conviction': bool(row.get('is_high_conviction', False)),
+                'recommended_option': row.get('recommended_option', ''),
+                'direction': row.get('direction', ''),
+                'total_magnitude': float(row.get('total_magnitude', 0)),
+                'greeks_theta_met': bool(row.get('greeks_theta_met', False)),
+                'greeks_gamma_met': bool(row.get('greeks_gamma_met', False)),
+                'greeks_vega_met': bool(row.get('greeks_vega_met', False)),
+                'greeks_otm_met': bool(row.get('greeks_otm_met', False)),
+                'greeks_theta_value': float(row.get('greeks_theta_value', 0) or 0),
+                'greeks_gamma_value': float(row.get('greeks_gamma_value', 0) or 0),
+                'greeks_vega_value': float(row.get('greeks_vega_value', 0) or 0),
+                'greeks_otm_value': float(row.get('greeks_otm_value', 0) or 0),
+                'greeks_theta_percentile': float(row.get('greeks_theta_percentile', 0) or 0),
+                'greeks_gamma_percentile': float(row.get('greeks_gamma_percentile', 0) or 0),
+                'greeks_vega_percentile': float(row.get('greeks_vega_percentile', 0) or 0),
+                'greeks_otm_percentile': float(row.get('greeks_otm_percentile', 0) or 0)
             }
         }
         return anomaly_data

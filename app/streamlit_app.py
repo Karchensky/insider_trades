@@ -69,12 +69,6 @@ def main():
     # Sidebar Configuration
     st.sidebar.header("Navigation")
     
-    # Add refresh button at top
-    if st.sidebar.button("🔄 Refresh Data", help="Clear cache and reload latest data from database"):
-        st.cache_data.clear()
-        st.session_state.clear()
-        st.rerun()
-    
     # Page selection - 3 main sections
     page = st.sidebar.radio(
         "Select View",
@@ -154,7 +148,8 @@ def render_greeks_based_page(anomalies_df: pd.DataFrame, available_symbols: list
             key="greeks_date"
         )
         if st.sidebar.button("Back to Overview", key="greeks_back"):
-            st.session_state.greeks_selected_symbol = 'Overview'
+            # Use query params to avoid widget key conflict
+            st.query_params.clear()
             st.rerun()
     
     # Main content
@@ -201,13 +196,13 @@ def render_greeks_based_page(anomalies_df: pd.DataFrame, available_symbols: list
                 avg_score = hc_df['high_conviction_score'].mean()
                 st.metric("Avg Greeks Score", f"{avg_score:.1f}/4")
     else:
-        # Show symbol-specific Greeks analysis
+        # Show symbol-specific analysis (unified view)
         symbol_anomaly_data = get_symbol_anomaly_data(selected_symbol, selected_date)
         
         if symbol_anomaly_data:
-            create_greeks_symbol_analysis(selected_symbol, symbol_anomaly_data, selected_date)
+            create_symbol_analysis(selected_symbol, symbol_anomaly_data, selected_date)
         else:
-            st.warning(f"No high conviction data for {selected_symbol} on {selected_date}")
+            st.warning(f"No data for {selected_symbol} on {selected_date}")
             create_basic_symbol_analysis(selected_symbol, selected_date)
         
         # Contracts and heatmaps
