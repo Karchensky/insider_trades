@@ -69,6 +69,12 @@ def main():
     # Sidebar Configuration
     st.sidebar.header("Navigation")
     
+    # Add refresh button at top
+    if st.sidebar.button("🔄 Refresh Data", help="Clear cache and reload latest data from database"):
+        st.cache_data.clear()
+        st.session_state.clear()
+        st.rerun()
+    
     # Page selection - 3 main sections
     page = st.sidebar.radio(
         "Select View",
@@ -97,6 +103,7 @@ def main():
     if page == "Performance Overview":
         create_performance_analysis_page()
     elif page == "Greeks-Based":
+        # Greeks page doesn't need legacy-filtered data
         render_greeks_based_page(anomalies_df, available_symbols)
     else:  # Legacy
         render_legacy_page(anomalies_df, available_symbols)
@@ -110,11 +117,8 @@ def render_greeks_based_page(anomalies_df: pd.DataFrame, available_symbols: list
     **Strategy**: Exit at +100% gain or hold to expiration. **Expected hit rate**: ~50%
     """)
     
-    # Filter to high conviction only
-    if not anomalies_df.empty and 'is_high_conviction' in anomalies_df.columns:
-        hc_df = anomalies_df[anomalies_df['is_high_conviction'] == True].copy()
-    else:
-        hc_df = pd.DataFrame()
+    # Get high conviction alerts directly (not filtered by legacy score)
+    hc_df = get_high_conviction_anomalies()
     
     # Symbol selection for Greeks-based view
     st.sidebar.markdown("---")

@@ -2322,9 +2322,9 @@ def create_performance_analysis_page() -> None:
 # GREEKS-BASED SYMBOL ANALYSIS
 # =============================================================================
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def get_high_conviction_anomalies() -> pd.DataFrame:
-    """Get only high conviction anomalies."""
+    """Get only high conviction anomalies (cached for 1 minute)."""
     conn = db.connect()
     try:
         import psycopg2.extras
