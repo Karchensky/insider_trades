@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
 """
-Email Notification System for Greeks-Based High Conviction Alerts
+Email Notification System for High Conviction Anomaly Alerts
 
-Sends email notifications ONLY when Greeks-based high conviction alerts are detected.
-Legacy composite score alerts are logged but do not trigger emails.
+Two-tier architecture:
+- TIER 1 (Event scoring): volume_score, z_score, vol_oi_score, magnitude — gates alerts
+- TIER 2 (Contract selection): max_volume selection — picks recommended option
+
+Sends email notifications when event-level score >= 3/4 and magnitude >= $20K.
 """
 
 import os
 import smtplib
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from email.mime.text import MIMEText as MimeText
 from email.mime.multipart import MIMEMultipart as MimeMultipart
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# Try to import enrichment module
+try:
+    from enrichment.signal_enrichment import SignalEnrichment
+    ENRICHMENT_AVAILABLE = True
+except ImportError:
+    ENRICHMENT_AVAILABLE = False
+    logger.info("Enrichment module not available - alerts will send without enrichment context")
 
 class EmailNotifier:
     def __init__(self):
@@ -52,79 +63,103 @@ class EmailNotifier:
         
     def send_anomaly_alert(self, anomalies: Dict[str, Dict]) -> bool:
         """Send email alert for detected anomalies.
-        
-        ONLY sends email if there are Greeks-based high conviction alerts (score >= 3).
-        Legacy composite score alerts are logged but do not trigger emails.
+
+        Sends email when event-level score >= 3/4 (volume_score, z_score, vol_oi_score, magnitude).
+        Bot-driven and earnings-related events are excluded.
         """
         if not self.enabled:
             logger.info("Email notifications disabled")
             return True
-            
+
         if not anomalies:
             logger.info("No anomalies to report")
             return True
-        
+
         BOT_THRESHOLD_PCT = 5.0
-            
-        # Filter for Greeks-based high conviction alerts ONLY
-        high_conviction_greeks_alerts = {}
+
+        # Filter for high conviction alerts (event score >= 3)
+        high_conviction_alerts = {}
         bot_filtered_count = 0
-        legacy_only_count = 0
-        
+
         for symbol, data in anomalies.items():
             if data.get('total_magnitude', 0) < 20000:
                 continue
-            
+
             intraday_move = abs(data.get('intraday_price_move_pct', 0))
             if intraday_move >= BOT_THRESHOLD_PCT:
                 logger.info(f"Excluding {symbol}: intraday move {intraday_move:.1f}% >= {BOT_THRESHOLD_PCT}% (likely bot-driven)")
                 bot_filtered_count += 1
                 continue
-            
-            # ONLY include Greeks-based high conviction alerts (score >= 3)
+
+            # Event score >= 3 gates alerts
             if data.get('is_high_conviction', False):
-                high_conviction_greeks_alerts[symbol] = data
-                logger.info(f"HIGH CONVICTION ALERT: {symbol} - Greeks score {data.get('high_conviction_score', 0)}/4, Recommended: {data.get('recommended_option', 'N/A')}")
-            elif data.get('composite_score', 0) >= 7.5:
-                legacy_only_count += 1
-                logger.info(f"Legacy-only alert (no email): {symbol} - Composite score {data.get('composite_score', 0):.1f}")
-        
+                high_conviction_alerts[symbol] = data
+                logger.info(
+                    f"HIGH CONVICTION ALERT: {symbol} - Event score {data.get('high_conviction_score', 0)}/4, "
+                    f"Recommended: {data.get('recommended_option', 'N/A')}"
+                )
+
         if bot_filtered_count > 0:
             logger.info(f"Filtered out {bot_filtered_count} bot-driven anomalies (>={BOT_THRESHOLD_PCT}% intraday move)")
-        
-        if legacy_only_count > 0:
-            logger.info(f"Skipped {legacy_only_count} legacy-only alerts (not Greeks-based high conviction)")
-        
-        # ONLY send email if we have Greeks-based high conviction alerts
-        if not high_conviction_greeks_alerts:
-            logger.info("No Greeks-based high conviction alerts - no email sent")
+
+        if not high_conviction_alerts:
+            logger.info("No high conviction alerts - no email sent")
             return False
-        
-        logger.info(f"Found {len(high_conviction_greeks_alerts)} HIGH CONVICTION (Greeks-based) alerts - sending email!")
-            
+
+        logger.info(f"Found {len(high_conviction_alerts)} HIGH CONVICTION alerts - sending email!")
+
+        # Enrich alerts with external context (news, EDGAR, novelty)
+        enrichment_data = {}
+        if ENRICHMENT_AVAILABLE:
+            try:
+                enricher = SignalEnrichment(skip_edgar=False, skip_news=False)
+                today = date.today()
+                for symbol, data in high_conviction_alerts.items():
+                    event_date = data.get('event_date', today)
+                    if isinstance(event_date, str):
+                        try:
+                            event_date = datetime.strptime(event_date, '%Y-%m-%d').date()
+                        except ValueError:
+                            event_date = today
+                    elif isinstance(event_date, datetime):
+                        event_date = event_date.date()
+
+                    details = data.get('details', {})
+                    call_vol = details.get('call_volume', 0)
+                    put_vol = details.get('put_volume', 0)
+                    direction = 'call_heavy' if call_vol > put_vol else 'put_heavy'
+
+                    enrichment = enricher.enrich_event(symbol, event_date, direction)
+                    enrichment_data[symbol] = enrichment
+                    logger.info(f"Enrichment for {symbol}: conviction modifier={enrichment.get('conviction_modifiers', {}).get('net_modifier', 'N/A')}")
+            except Exception as e:
+                logger.warning(f"Enrichment failed (alerts will send without context): {e}")
+
         try:
-            greeks_alerts_count = len(high_conviction_greeks_alerts)
-            subject = f"[{greeks_alerts_count} HIGH CONVICTION] INSIDER TRADING ALERT"
-            
-            html_content = self._create_email_content(high_conviction_greeks_alerts)
-            
+            alert_count = len(high_conviction_alerts)
+            subject = f"[{alert_count} HIGH CONVICTION] INSIDER TRADING ALERT"
+
+            html_content = self._create_email_content(high_conviction_alerts, enrichment_data)
+
             self._send_email(subject, html_content)
-            logger.info(f"Email alert sent for {greeks_alerts_count} Greeks-based high conviction alerts")
+            logger.info(f"Email alert sent for {alert_count} high conviction alerts")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to send email alert: {e}")
             return False
 
-    def _create_email_content(self, alerts: Dict[str, Dict]) -> str:
-        """Create HTML email content for Greeks-based high conviction alerts."""
+    def _create_email_content(self, alerts: Dict[str, Dict],
+                             enrichment_data: Optional[Dict[str, Dict]] = None) -> str:
+        """Create HTML email content for high conviction alerts."""
+        enrichment_data = enrichment_data or {}
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S EST')
-        
+
         sorted_alerts = sorted(
-            alerts.items(), 
-            key=lambda x: -x[1].get('high_conviction_score', 0)
+            alerts.items(),
+            key=lambda x: (-x[1].get('high_conviction_score', 0), -x[1].get('total_magnitude', 0))
         )
-        
+
         html = f"""
         <html>
         <head>
@@ -137,34 +172,40 @@ class EmailNotifier:
                 .alert-table td {{ border: 1px solid #ddd; padding: 10px; }}
                 .bullish {{ color: #2e7d32; font-weight: bold; }}
                 .bearish {{ color: #c62828; font-weight: bold; }}
+                .factor-met {{ color: #2e7d32; }}
+                .factor-miss {{ color: #999; }}
                 .details {{ margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; background-color: #fafafa; }}
+                .enrichment {{ margin: 10px 0; padding: 12px; border-left: 4px solid #2196F3; background-color: #e3f2fd; border-radius: 3px; font-size: 13px; }}
+                .enrichment-high {{ border-left-color: #f44336; background-color: #ffebee; }}
+                .enrichment-low {{ border-left-color: #9e9e9e; background-color: #f5f5f5; }}
                 .footer {{ margin-top: 30px; font-size: 12px; color: #666; }}
             </style>
         </head>
         <body>
             <div class="header">
                 <h1>HIGH CONVICTION INSIDER TRADING ALERT</h1>
-                <p>Greeks-Based Scoring System | {timestamp}</p>
+                <p>Event Scoring + Greeks Contract Selection | {timestamp}</p>
             </div>
-            
+
             <div class="summary">
                 <h2>{len(sorted_alerts)} High Conviction Alert(s)</h2>
                 <p><strong>Strategy:</strong> Exit at +100% gain, or hold to expiration</p>
-                <p><strong>Expected hit rate:</strong> ~50% for +100% returns</p>
-                <p><strong>Scoring:</strong> Based on Theta, Gamma, Vega, OTM Score (93rd percentile thresholds)</p>
+                <p><strong>Event scoring:</strong> Volume anomaly, Z-score, Vol:OI ratio, Magnitude (3+ of 4 must exceed thresholds)</p>
+                <p><strong>Contract selection:</strong> Highest-gamma tradeable contract (best delta exposure)</p>
+                <p><strong>Filters:</strong> Not bot-driven (&lt;5% intraday move), not earnings-related</p>
                 <p><strong>Dashboard:</strong> <a href="https://bk-insidertrades.streamlit.app">https://bk-insidertrades.streamlit.app</a></p>
             </div>
-            
+
             <table class="alert-table">
                 <tr>
                     <th>Symbol</th>
                     <th>Direction</th>
-                    <th>Greeks Score</th>
+                    <th>Event Score</th>
                     <th>Recommended Option</th>
                     <th>Magnitude</th>
                 </tr>
         """
-        
+
         for symbol, data in sorted_alerts:
             details = data.get('details', {})
             call_vol = details.get('call_volume', 0)
@@ -172,7 +213,7 @@ class EmailNotifier:
             direction = "BULLISH" if call_vol > put_vol else "BEARISH"
             direction_class = "bullish" if direction == "BULLISH" else "bearish"
             magnitude = data.get('total_magnitude', 0)
-            
+
             html += f"""
                 <tr>
                     <td><strong>{symbol}</strong></td>
@@ -182,39 +223,84 @@ class EmailNotifier:
                     <td>${magnitude:,.0f}</td>
                 </tr>
             """
-        
+
         html += "</table>"
-        
+
         # Detailed breakdown
         html += "<h2>Detailed Breakdown</h2>"
-        
+
         for symbol, data in sorted_alerts:
             details = data.get('details', {})
             call_vol = details.get('call_volume', 0)
             put_vol = details.get('put_volume', 0)
             direction = "BULLISH" if call_vol > put_vol else "BEARISH"
-            
+
+            vol_score = details.get('volume_score', 0)
+            z_score = details.get('z_score', 0)
+            voi_score = details.get('volume_oi_ratio_score', 0)
+            mag = details.get('total_magnitude', 0)
+
+            def factor_badge(met, label, value):
+                css = "factor-met" if met else "factor-miss"
+                check = "&#10003;" if met else "&#10007;"
+                return f'<span class="{css}">{check} {label}: {value}</span>'
+
             html += f"""
             <div class="details">
                 <h3>{symbol} - {direction}</h3>
-                <p><strong>Greeks Score:</strong> {data.get('high_conviction_score', 0)}/4</p>
-                <p><strong>Recommended Option:</strong> <code>{data.get('recommended_option', 'N/A')}</code></p>
-                <p><strong>Magnitude:</strong> ${details.get('total_magnitude', 0):,.0f} (Call: ${details.get('call_magnitude', 0):,.0f}, Put: ${details.get('put_magnitude', 0):,.0f})</p>
-                <p><strong>Volume:</strong> {call_vol + put_vol:,} contracts (Call: {call_vol:,}, Put: {put_vol:,})</p>
-                <p><strong>OTM Score:</strong> {details.get('otm_score', 0):.2f}</p>
-            </div>
+                <p><strong>Event Score:</strong> {data.get('high_conviction_score', 0)}/4</p>
+                <p><strong>Event Factors:</strong><br>
+                    {factor_badge(vol_score >= 2.0, 'Volume Score', f'{vol_score:.1f}')}<br>
+                    {factor_badge(z_score >= 3.0, 'Z-Score', f'{z_score:.1f}')}<br>
+                    {factor_badge(voi_score >= 1.2, 'Vol:OI Score', f'{voi_score:.1f}')}<br>
+                    {factor_badge(mag >= 50000, 'Magnitude', f'${mag:,.0f}')}
+                </p>
+                <p><strong>Recommended Option:</strong> <code>{data.get('recommended_option', 'N/A')}</code>
+                   (selection: {data.get('contract_selection_strategy', 'max_volume')})</p>
+                <p><strong>Magnitude:</strong> ${details.get('total_magnitude', 0):,.0f}
+                   (Call: ${details.get('call_magnitude', 0):,.0f}, Put: ${details.get('put_magnitude', 0):,.0f})</p>
+                <p><strong>Volume:</strong> {call_vol + put_vol:,} contracts
+                   (Call: {call_vol:,}, Put: {put_vol:,})</p>
             """
-        
+
+            # Add enrichment context if available
+            enrichment = enrichment_data.get(symbol)
+            if enrichment:
+                net_mod = enrichment.get('conviction_modifiers', {}).get('net_modifier', 0)
+                css_class = 'enrichment-high' if net_mod >= 2 else 'enrichment-low' if net_mod <= -1 else ''
+                html += f'<div class="enrichment {css_class}">'
+                html += '<strong>Signal Context:</strong><br>'
+
+                if ENRICHMENT_AVAILABLE:
+                    html += SignalEnrichment.format_for_email(enrichment)
+                else:
+                    # Manual formatting fallback
+                    novelty = enrichment.get('novelty', {})
+                    if novelty.get('is_first_trigger'):
+                        html += 'FIRST-TIME TRIGGER - never seen anomaly on this ticker<br>'
+                    elif novelty.get('trigger_count_30d', 0) <= 2:
+                        html += f'Rare trigger - {novelty.get("trigger_count_30d", "?")}x in 30 days<br>'
+
+                    news = enrichment.get('news', {})
+                    if news.get('has_news') is False:
+                        html += 'NO RECENT NEWS - possible information asymmetry<br>'
+                    elif news.get('has_catalyst_news'):
+                        html += f'Known catalyst: {", ".join(news.get("catalyst_keywords", [])[:3])}<br>'
+
+                html += '</div>'
+
+            html += "</div>"
+
         html += """
             <div class="footer">
-                <p><strong>DISCLAIMER:</strong> This alert is for informational purposes only. 
+                <p><strong>DISCLAIMER:</strong> This alert is for informational purposes only.
                 Detection of statistical anomalies does not constitute proof of insider trading or investment advice.</p>
-                <p>Generated by Insider Trading Detection System</p>
+                <p>Generated by Insider Trading Detection System (Two-Tier Architecture)</p>
             </div>
         </body>
         </html>
         """
-        
+
         return html
     
     def _send_email(self, subject: str, html_content: str):

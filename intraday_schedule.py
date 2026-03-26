@@ -203,24 +203,66 @@ def run_once(include_otc: bool,
                 if anomaly_results.get('success'):
                     anomaly_count = anomaly_results.get('anomalies_detected', 0)
                     contracts_analyzed = anomaly_results.get('contracts_analyzed', 0)
-                    logger.info(f"[anomaly_detection] ✓ {anomaly_count} symbols scored >= 7.0 from {contracts_analyzed:,} contracts")
+                    logger.info(f"[anomaly_detection] ✓ {anomaly_count} anomalies detected from {contracts_analyzed:,} contracts")
                     
                     if anomaly_count > 0:
-                        logger.info(f"[anomaly_detection] ✓ High-scoring symbols detected - checking volume thresholds for alerts")
+                        logger.info(f"[anomaly_detection] ✓ Anomalies detected - checking persistence and conviction thresholds")
                         
-                        # Send email notification for high-conviction anomalies
-                        logger.info("[notifications] Sending email alert for high-conviction anomalies...")
-                        try:
-                            # Get the detected anomalies from the detector
-                            anomalies = anomaly_results.get('anomalies', {})
-                            if send_anomaly_notification(anomalies):
-                                logger.info(f"[notifications] ✓ Email alert sent for anomalies")
-                            else:
-                                logger.info("[notifications] ✓ No email sent - no anomalies met volume threshold")
-                        except Exception as ne:
-                            logger.error(f"[notifications] ✗ Email notification error: {ne}")
+                        # Update signal persistence counts for high conviction symbols
+                        anomalies = anomaly_results.get('anomalies', {})
+                        high_conviction_symbols = [
+                            sym for sym, data in anomalies.items() 
+                            if data.get('is_high_conviction', False)
+                        ]
+                        
+                        if high_conviction_symbols:
+                            persistence_counts = detector.update_signal_persistence(high_conviction_symbols)
+                            logger.info(f"[persistence] Updated persistence for {len(persistence_counts)} high-conviction symbols")
+                            
+                            # Log persistence status for each symbol
+                            for sym, count in persistence_counts.items():
+                                if count >= 2:
+                                    logger.info(f"[persistence] ✓ {sym}: {count} consecutive snapshots (PERSISTENT)")
+                                else:
+                                    logger.debug(f"[persistence] {sym}: {count} snapshot (waiting for confirmation)")
+                        
+                        # Get signals that meet persistence threshold (2+ consecutive snapshots)
+                        persistent_signals = detector.get_persistent_signals(min_persistence=2)
+                        
+                        if persistent_signals:
+                            logger.info(f"[persistence] {len(persistent_signals)} symbols meet persistence threshold")
+                            
+                            # Filter anomalies to only include persistent ones for alerting
+                            persistent_anomalies = {
+                                sig['symbol']: anomalies.get(sig['symbol'], {})
+                                for sig in persistent_signals
+                                if sig['symbol'] in anomalies
+                            }
+                            
+                            # Send email notification only for persistent high-conviction anomalies
+                            logger.info("[notifications] Sending email alert for persistent high-conviction anomalies...")
+                            try:
+                                if send_anomaly_notification(persistent_anomalies):
+                                    logger.info(f"[notifications] ✓ Email alert sent for {len(persistent_anomalies)} persistent anomalies")
+                                else:
+                                    logger.info("[notifications] ✓ No email sent - no persistent anomalies met volume threshold")
+                            except Exception as ne:
+                                logger.error(f"[notifications] ✗ Email notification error: {ne}")
+                        else:
+                            logger.info("[persistence] No signals meet persistence threshold yet - waiting for confirmation")
+                            
+                            # Still send alerts for first-time high-conviction signals (legacy behavior)
+                            # but mark them as "UNCONFIRMED" in the notification
+                            logger.info("[notifications] Checking for first-time high-conviction signals...")
+                            try:
+                                if send_anomaly_notification(anomalies):
+                                    logger.info(f"[notifications] ✓ Email alert sent for first-time anomalies (unconfirmed)")
+                                else:
+                                    logger.info("[notifications] ✓ No email sent - no anomalies met volume threshold")
+                            except Exception as ne:
+                                logger.error(f"[notifications] ✗ Email notification error: {ne}")
                     else:
-                        logger.info("[anomaly_detection] ✓ No symbols scored >= 7.0 - market activity within normal ranges")
+                        logger.info("[anomaly_detection] ✓ No high-conviction anomalies - market activity within normal ranges")
                 else:
                     logger.error(f"[anomaly_detection] ✗ Detection failed: {anomaly_results.get('error')}")
             except Exception as ee:

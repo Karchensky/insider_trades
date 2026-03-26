@@ -104,6 +104,31 @@ class DatabaseConnection:
             logger.error(f"Connection test failed: {e}")
             return False
     
+    def execute_with_timeout(self, query: str, params: Optional[tuple] = None, 
+                            timeout_ms: int = 300000) -> List[Dict[str, Any]]:
+        """Execute a query with a custom statement timeout.
+        
+        Args:
+            query: SQL query to execute
+            params: Query parameters
+            timeout_ms: Statement timeout in milliseconds (default 5 min)
+        
+        Returns:
+            List of result dictionaries
+        """
+        conn = self.connect()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(f"SET statement_timeout = '{timeout_ms}'")
+                cursor.execute(query, params)
+                results = cursor.fetchall()
+                cursor.execute("RESET statement_timeout")
+                return [dict(row) for row in results]
+        except psycopg2.Error as e:
+            logger.error(f"Query execution failed: {e}")
+            conn.rollback()
+            raise
+    
     def __enter__(self):
         """Context manager entry."""
         self.connect()

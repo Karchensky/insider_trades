@@ -350,20 +350,7 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     except Exception as te:
         logger.error(f"[temp_option] truncate failed: {te}")
 
-    # Step 8: Truncate temp tables (intraday data no longer needed after daily processing)
-    logger.info("Step 8: Truncating temp tables...")
-    try:
-        from database.core.connection import db as _db
-        _conn = _db.connect()
-        with _conn.cursor() as _cur:
-            _cur.execute("TRUNCATE temp_stock, temp_option")
-            _conn.commit()
-        _conn.close()
-        logger.info("✓ Truncated temp_stock and temp_option tables")
-    except Exception as e:
-        logger.error(f"✗ Failed to truncate temp tables: {e}")
-    
-    # Step 9: Retention cleanup for all historical data
+    # Retention cleanup for all historical data
     logger.info("Applying retention policy with bulk deletion…")
     retention = DataRetentionManager()
     tables_to_clean = [

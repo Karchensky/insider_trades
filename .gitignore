@@ -9,6 +9,13 @@ __pycache__/
 # Supabase
 *supabase/
 
+# IDE / AI
+.cursor/
+
+# Generated analysis output
+*.png
+terminal_results.txt
+
 # Distribution / packaging
 .Python
 build/

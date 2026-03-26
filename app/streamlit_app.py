@@ -72,7 +72,7 @@ def main():
     # Page selection - 3 main sections
     page = st.sidebar.radio(
         "Select View",
-        ["Greeks-Based", "Legacy", "Performance Overview"],
+        ["High Conviction", "Legacy", "Performance Overview"],
         index=0
     )
     
@@ -96,19 +96,22 @@ def main():
     # Route to appropriate page
     if page == "Performance Overview":
         create_performance_analysis_page()
-    elif page == "Greeks-Based":
-        # Greeks page doesn't need legacy-filtered data
+    elif page == "High Conviction":
         render_greeks_based_page(anomalies_df, available_symbols)
     else:  # Legacy
         render_legacy_page(anomalies_df, available_symbols)
 
 
 def render_greeks_based_page(anomalies_df: pd.DataFrame, available_symbols: list):
-    """Render the Greeks-based high conviction interface."""
-    st.markdown("## Greeks-Based High Conviction Alerts")
+    """Render the high conviction interface using two-tier scoring."""
+    st.markdown("## High Conviction Alerts")
     st.markdown("""
-    Alerts scored by Greeks factors (Theta, Gamma, Vega, OTM Score) at 93rd percentile thresholds.
-    **Strategy**: Exit at +100% gain or hold to expiration. **Expected hit rate**: ~50%
+    **Tier 1 — Event scoring** (symbol-level): Volume anomaly (`>= 2.0`), Z-score (`>= 3.0`), Vol:OI ratio (`>= 1.2`), Magnitude (`>= $50K`).
+    Alert fires when 3+ of 4 factors exceed thresholds. Filters: not bot-driven (<5% intraday move), not earnings-related.
+
+    **Tier 2 — Contract selection**: Highest-volume tradeable contract ($0.05-$5.00, vol > 50, direction-aligned).
+
+    **Enrichment**: Alerts include signal context — symbol novelty, recent news, SEC insider filings — to aid manual review.
     """)
     
     # Get high conviction alerts directly (not filtered by legacy score)
@@ -158,11 +161,11 @@ def render_greeks_based_page(anomalies_df: pd.DataFrame, available_symbols: list
         if hc_df.empty:
             st.info("No high conviction alerts detected.")
             st.markdown("""
-            High conviction alerts require a Greeks Score >= 3/4 based on:
-            - Theta >= 0.1624
-            - Gamma >= 0.4683
-            - Vega >= 0.1326
-            - OTM Score >= 1.4
+            High conviction alerts require an Event Score >= 3/4 based on:
+            - Volume Score >= 2.0 (volume anomaly)
+            - Z-Score >= 3.0 (statistical deviation)
+            - Vol:OI Score >= 1.2 (fresh positioning)
+            - Magnitude >= $50,000 (institutional scale)
             """)
         else:
             # Display alerts table
@@ -170,14 +173,14 @@ def render_greeks_based_page(anomalies_df: pd.DataFrame, available_symbols: list
             
             display_df = hc_df[['event_date', 'symbol', 'direction', 'high_conviction_score', 
                                'recommended_option', 'otm_score', 'total_magnitude']].copy()
-            display_df.columns = ['Date', 'Symbol', 'Direction', 'Greeks Score', 
+            display_df.columns = ['Date', 'Symbol', 'Direction', 'Event Score',
                                  'Recommended Option', 'OTM Score', 'Magnitude ($)']
             display_df['Magnitude ($)'] = display_df['Magnitude ($)'].apply(lambda x: f"${x:,.0f}")
             display_df['Direction'] = display_df['Direction'].apply(
                 lambda x: "BULLISH" if x == 'call_heavy' else "BEARISH" if x == 'put_heavy' else x
             )
             display_df['OTM Score'] = display_df['OTM Score'].apply(lambda x: f"{x:.2f}")
-            display_df['Greeks Score'] = display_df['Greeks Score'].apply(lambda x: f"{x}/4")
+            display_df['Event Score'] = display_df['Event Score'].apply(lambda x: f"{x}/4")
             
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             
@@ -194,7 +197,7 @@ def render_greeks_based_page(anomalies_df: pd.DataFrame, available_symbols: list
                 st.metric("Bearish", bearish)
             with col4:
                 avg_score = hc_df['high_conviction_score'].mean()
-                st.metric("Avg Greeks Score", f"{avg_score:.1f}/4")
+                st.metric("Avg Event Score", f"{avg_score:.1f}/4")
     else:
         # Show symbol-specific analysis (unified view)
         symbol_anomaly_data = get_symbol_anomaly_data(selected_symbol, selected_date)
@@ -275,8 +278,9 @@ def render_legacy_page(anomalies_df: pd.DataFrame, available_symbols: list):
     # Footer
     st.markdown("---")
     st.markdown("""
-    **Detection Method**: Statistical Z-score analysis vs 90-day baseline  
-    **Alert Threshold**: Score >= 7.5/10.0, Magnitude >= $20K
+    **Detection Method**: Statistical Z-score analysis vs 90-day baseline
+    **Legacy alert threshold**: Score >= 7.5/10.0, Magnitude >= $20K
+    **Current system**: Use the High Conviction tab (event scoring, 3+/4 factors)
     """)
 
 
