@@ -598,16 +598,17 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict, selected_date: date 
     
     details = anomaly_data.get('details', {})
     
-    # Greeks Score Section (if available)
+    # Event Scoring & Enrichment Context
     hc_score = details.get('high_conviction_score', 0)
     is_hc = details.get('is_high_conviction', False)
-    
+
     if hc_score > 0 or is_hc:
-        st.subheader("Greeks-Based High Conviction Scoring")
-        
-        col1, col2, col3, col4 = st.columns(4)
+        st.subheader("Event Scoring")
+
+        # Header metrics row
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
-            st.metric("Greeks Score", f"{hc_score}/4", help="Requires 3/4 factors at 93rd percentile")
+            st.metric("Event Score", f"{hc_score}/4", help="3+/4 factors required: volume >= 2.0, z-score >= 3.0, vol:OI >= 1.2, magnitude >= $50K")
         with col2:
             status = "HIGH CONVICTION" if is_hc else "Below Threshold"
             st.metric("Status", status)
@@ -618,64 +619,85 @@ def create_symbol_analysis(symbol: str, anomaly_data: Dict, selected_date: date 
         with col4:
             magnitude = details.get('total_magnitude', 0)
             st.metric("Magnitude", f"${magnitude:,.0f}")
-        
-        # Greek components breakdown
-        st.markdown("**Greeks Components:**")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            theta_met = details.get('greeks_theta_met', False)
-            theta_val = details.get('greeks_theta_value', 0)
-            theta_pct = details.get('greeks_theta_percentile', 0)
-            status_icon = "✅" if theta_met else "❌"
-            st.metric(
-                f"Theta {status_icon}",
-                f"{theta_val:.4f}",
-                delta=f"{theta_pct:.0f}th percentile",
-                help="Threshold: 0.1624 (93rd percentile)"
-            )
-        
-        with col2:
-            gamma_met = details.get('greeks_gamma_met', False)
-            gamma_val = details.get('greeks_gamma_value', 0)
-            gamma_pct = details.get('greeks_gamma_percentile', 0)
-            status_icon = "✅" if gamma_met else "❌"
-            st.metric(
-                f"Gamma {status_icon}",
-                f"{gamma_val:.4f}",
-                delta=f"{gamma_pct:.0f}th percentile",
-                help="Threshold: 0.4683 (93rd percentile)"
-            )
-        
-        with col3:
-            vega_met = details.get('greeks_vega_met', False)
-            vega_val = details.get('greeks_vega_value', 0)
-            vega_pct = details.get('greeks_vega_percentile', 0)
-            status_icon = "✅" if vega_met else "❌"
-            st.metric(
-                f"Vega {status_icon}",
-                f"{vega_val:.4f}",
-                delta=f"{vega_pct:.0f}th percentile",
-                help="Threshold: 0.1326 (93rd percentile)"
-            )
-        
-        with col4:
-            otm_met = details.get('greeks_otm_met', False)
-            otm_val = details.get('greeks_otm_value', 0)
-            otm_pct = details.get('greeks_otm_percentile', 0)
-            status_icon = "✅" if otm_met else "❌"
-            st.metric(
-                f"OTM Score {status_icon}",
-                f"{otm_val:.2f}",
-                delta=f"{otm_pct:.0f}th percentile",
-                help="Threshold: 1.4 (93rd percentile)"
-            )
-        
-        # Recommended option
-        recommended_option = details.get('recommended_option', '')
-        if recommended_option:
-            st.markdown(f"**Recommended Option:** `{recommended_option}`")
-        
+        with col5:
+            recommended_option = details.get('recommended_option', '')
+            if recommended_option:
+                st.metric("Recommended", recommended_option, help="Highest-volume tradeable contract ($0.05-$5.00, vol > 50)")
+            else:
+                st.metric("Recommended", "N/A")
+
+        # Event score factor breakdown
+        st.markdown("**Event Score Factors:**")
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        with fc1:
+            vs = details.get('volume_score', 0)
+            st.metric("Volume Score", f"{vs:.2f}", delta="PASS" if vs >= 2.0 else "FAIL", delta_color="normal" if vs >= 2.0 else "inverse")
+        with fc2:
+            zs = details.get('z_score', 0) if details.get('z_score') else 0
+            st.metric("Z-Score", f"{zs:.2f}", delta="PASS" if zs >= 3.0 else "FAIL", delta_color="normal" if zs >= 3.0 else "inverse")
+        with fc3:
+            voi = details.get('volume_oi_ratio_score', 0)
+            st.metric("Vol:OI Ratio", f"{voi:.2f}", delta="PASS" if voi >= 1.2 else "FAIL", delta_color="normal" if voi >= 1.2 else "inverse")
+        with fc4:
+            mag = details.get('total_magnitude', 0)
+            st.metric("Magnitude", f"${mag:,.0f}", delta="PASS" if mag >= 50000 else "FAIL", delta_color="normal" if mag >= 50000 else "inverse")
+
+        # Enrichment context
+        enrichment_available = details.get('enrichment_available', False)
+        if enrichment_available:
+            st.markdown("**Signal Context (Enrichment):**")
+            ec1, ec2, ec3 = st.columns(3)
+
+            with ec1:
+                st.markdown("**Novelty**")
+                is_first = details.get('enrichment_novelty_is_first', False)
+                count_30d = details.get('enrichment_novelty_count_30d', 0)
+                if is_first:
+                    st.markdown("**FIRST-TIME TRIGGER** -- never seen anomaly on this ticker")
+                elif count_30d <= 2:
+                    st.markdown(f"**RARE** -- {count_30d}x in 30 days")
+                else:
+                    st.markdown(f"Frequent -- {count_30d}x in 30 days")
+
+            with ec2:
+                st.markdown("**News**")
+                has_news = details.get('enrichment_news_has_news')
+                news_count = details.get('enrichment_news_count', 0)
+                has_catalyst = details.get('enrichment_news_has_catalyst', False)
+                if has_news is False or (has_news is None and news_count == 0):
+                    st.markdown("**NO RECENT NEWS** -- possible information asymmetry")
+                elif has_catalyst:
+                    st.markdown(f"{news_count} articles -- **catalyst news found**")
+                else:
+                    st.markdown(f"{news_count} recent articles (no catalyst keywords)")
+
+            with ec3:
+                st.markdown("**SEC EDGAR**")
+                has_filings = details.get('enrichment_edgar_has_filings')
+                filing_count = details.get('enrichment_edgar_filing_count', 0)
+                alignment = details.get('enrichment_edgar_alignment')
+                if has_filings and alignment == 'aligned':
+                    st.markdown(f"{filing_count} Form 4 filings -- **ALIGNED** with anomaly direction")
+                elif has_filings and alignment == 'contradictory':
+                    st.markdown(f"{filing_count} Form 4 filings -- contradictory to anomaly direction")
+                elif has_filings:
+                    st.markdown(f"{filing_count} Form 4 filings (direction unclear)")
+                else:
+                    st.markdown("No recent insider filings")
+
+            # Conviction modifier summary
+            modifier = details.get('enrichment_conviction_modifier', 0)
+            if modifier >= 2:
+                st.success(f"ENRICHMENT CONVICTION: HIGH (+{modifier}) -- Multiple signals align")
+            elif modifier >= 1:
+                st.info(f"Enrichment conviction: elevated (+{modifier})")
+            elif modifier == 0:
+                st.info("Enrichment conviction: neutral (0)")
+            else:
+                st.warning(f"Enrichment conviction: reduced ({modifier})")
+        else:
+            st.info("Enrichment data not available for this signal (pre-enrichment era).")
+
         st.markdown("---")
     
     # Legacy Score Breakdown
@@ -1682,7 +1704,18 @@ def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, 
                 greeks_theta_percentile,
                 greeks_gamma_percentile,
                 greeks_vega_percentile,
-                greeks_otm_percentile
+                greeks_otm_percentile,
+                enrichment_novelty_is_first,
+                enrichment_novelty_count_30d,
+                enrichment_novelty_score,
+                enrichment_news_has_news,
+                enrichment_news_count,
+                enrichment_news_has_catalyst,
+                enrichment_edgar_has_filings,
+                enrichment_edgar_filing_count,
+                enrichment_edgar_alignment,
+                enrichment_conviction_modifier,
+                enrichment_enriched_at
             FROM daily_anomaly_snapshot
             WHERE symbol = %s AND event_date = %s
             ORDER BY as_of_timestamp DESC
@@ -1729,7 +1762,19 @@ def get_symbol_anomaly_data(symbol: str, target_date: date = None) -> Dict[str, 
                 'greeks_theta_percentile': float(row.get('greeks_theta_percentile', 0) or 0),
                 'greeks_gamma_percentile': float(row.get('greeks_gamma_percentile', 0) or 0),
                 'greeks_vega_percentile': float(row.get('greeks_vega_percentile', 0) or 0),
-                'greeks_otm_percentile': float(row.get('greeks_otm_percentile', 0) or 0)
+                'greeks_otm_percentile': float(row.get('greeks_otm_percentile', 0) or 0),
+                # Enrichment context
+                'enrichment_novelty_is_first': bool(row.get('enrichment_novelty_is_first') or False),
+                'enrichment_novelty_count_30d': int(row.get('enrichment_novelty_count_30d') or 0),
+                'enrichment_novelty_score': float(row.get('enrichment_novelty_score') or 0),
+                'enrichment_news_has_news': row.get('enrichment_news_has_news'),
+                'enrichment_news_count': int(row.get('enrichment_news_count') or 0),
+                'enrichment_news_has_catalyst': bool(row.get('enrichment_news_has_catalyst') or False),
+                'enrichment_edgar_has_filings': row.get('enrichment_edgar_has_filings'),
+                'enrichment_edgar_filing_count': int(row.get('enrichment_edgar_filing_count') or 0),
+                'enrichment_edgar_alignment': row.get('enrichment_edgar_alignment'),
+                'enrichment_conviction_modifier': int(row.get('enrichment_conviction_modifier') or 0),
+                'enrichment_available': row.get('enrichment_enriched_at') is not None,
             }
         }
         return anomaly_data
@@ -2019,167 +2064,6 @@ def create_contracts_table(symbol: str, target_date: date = None) -> None:
 
 
 # =============================================================================
-# HIGH CONVICTION GREEKS FUNCTIONS
-# =============================================================================
-
-# Thresholds from validated analysis (93rd percentile)
-HIGH_CONVICTION_THRESHOLDS = {
-    'theta': 0.1624,
-    'gamma': 0.4683,
-    'vega': 0.1326,
-    'otm_score': 1.4
-}
-
-
-@st.cache_data(ttl=300)
-def get_recommended_option_details(contract_ticker: str) -> Dict:
-    """Get Greeks and details for a recommended option."""
-    if not contract_ticker:
-        return {}
-    
-    conn = db.connect()
-    try:
-        import psycopg2.extras
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        
-        # Try temp_option first (current data), then daily_option_snapshot
-        cur.execute("""
-            SELECT 
-                contract_ticker,
-                session_close as close_price,
-                session_volume as volume,
-                implied_volatility,
-                greeks_delta,
-                greeks_gamma,
-                greeks_theta,
-                greeks_vega,
-                open_interest
-            FROM temp_option
-            WHERE contract_ticker = %s
-            ORDER BY as_of_timestamp DESC
-            LIMIT 1
-        """, (contract_ticker,))
-        
-        row = cur.fetchone()
-        
-        if not row:
-            # Fallback to daily snapshot
-            cur.execute("""
-                SELECT 
-                    contract_ticker,
-                    close_price,
-                    volume,
-                    implied_volatility,
-                    greeks_delta,
-                    greeks_gamma,
-                    greeks_theta,
-                    greeks_vega,
-                    open_interest
-                FROM daily_option_snapshot
-                WHERE contract_ticker = %s
-                ORDER BY date DESC
-                LIMIT 1
-            """, (contract_ticker,))
-            row = cur.fetchone()
-        
-        return dict(row) if row else {}
-        
-    except Exception as e:
-        return {}
-    finally:
-        conn.close()
-
-
-def create_greeks_display(anomaly_data: Dict) -> None:
-    """Display Greeks information for high conviction alerts."""
-    
-    hc_score = anomaly_data.get('high_conviction_score', 0)
-    is_hc = anomaly_data.get('is_high_conviction', False)
-    recommended_option = anomaly_data.get('recommended_option', '')
-    otm_score = anomaly_data.get('otm_score', 0)
-    
-    if not is_hc and hc_score < 2:
-        return
-    
-    st.subheader("High Conviction Analysis")
-    
-    # Get option details
-    option_details = get_recommended_option_details(recommended_option) if recommended_option else {}
-    
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        status = "HIGH CONVICTION" if is_hc else "Moderate Signal"
-        st.markdown(f"""
-        ### Greeks Score: **{hc_score}/4**
-        **{status}**
-        
-        **Recommended Option:**  
-        `{recommended_option if recommended_option else 'N/A'}`
-        """)
-        
-        if option_details:
-            price = option_details.get('close_price', 0)
-            volume = option_details.get('volume', 0)
-            st.markdown(f"""
-            - **Price**: ${float(price):.2f}
-            - **Volume**: {int(volume):,}
-            """)
-    
-    with col2:
-        # Greeks breakdown with threshold comparison
-        theta = abs(float(option_details.get('greeks_theta', 0) or 0))
-        gamma = float(option_details.get('greeks_gamma', 0) or 0)
-        vega = float(option_details.get('greeks_vega', 0) or 0)
-        
-        theta_pass = theta >= HIGH_CONVICTION_THRESHOLDS['theta']
-        gamma_pass = gamma >= HIGH_CONVICTION_THRESHOLDS['gamma']
-        vega_pass = vega >= HIGH_CONVICTION_THRESHOLDS['vega']
-        otm_pass = otm_score >= HIGH_CONVICTION_THRESHOLDS['otm_score']
-        
-        st.markdown("**Factor Breakdown (93rd percentile thresholds):**")
-        
-        factors_data = [
-            ("Theta", theta, HIGH_CONVICTION_THRESHOLDS['theta'], theta_pass),
-            ("Gamma", gamma, HIGH_CONVICTION_THRESHOLDS['gamma'], gamma_pass),
-            ("Vega", vega, HIGH_CONVICTION_THRESHOLDS['vega'], vega_pass),
-            ("OTM Score", otm_score, HIGH_CONVICTION_THRESHOLDS['otm_score'], otm_pass),
-        ]
-        
-        for name, value, threshold, passed in factors_data:
-            status_str = "[PASS]" if passed else "[FAIL]"
-            st.markdown(f"{status_str} **{name}**: {value:.4f} (threshold: {threshold})")
-    
-    # Additional Greeks info
-    if option_details:
-        st.markdown("---")
-        cols = st.columns(5)
-        
-        with cols[0]:
-            delta = option_details.get('greeks_delta', 0)
-            st.metric("Delta", f"{float(delta or 0):.4f}")
-        
-        with cols[1]:
-            st.metric("Gamma", f"{gamma:.4f}", 
-                     delta="PASS" if gamma_pass else "FAIL",
-                     delta_color="normal" if gamma_pass else "inverse")
-        
-        with cols[2]:
-            st.metric("Theta", f"{theta:.4f}",
-                     delta="PASS" if theta_pass else "FAIL",
-                     delta_color="normal" if theta_pass else "inverse")
-        
-        with cols[3]:
-            st.metric("Vega", f"{vega:.4f}",
-                     delta="PASS" if vega_pass else "FAIL",
-                     delta_color="normal" if vega_pass else "inverse")
-        
-        with cols[4]:
-            iv = option_details.get('implied_volatility', 0)
-            st.metric("IV", f"{float(iv or 0):.1%}")
-
-
-# =============================================================================
 # PERFORMANCE ANALYSIS PAGE
 # =============================================================================
 
@@ -2351,7 +2235,7 @@ def create_performance_analysis_page() -> None:
     
     # Score breakdown
     st.markdown("---")
-    st.subheader("Performance by Greeks Score")
+    st.subheader("Performance by Event Score")
     
     score_data = []
     for score in range(5):
@@ -2402,8 +2286,8 @@ def create_performance_analysis_page() -> None:
                          annotation_text="Break-even (50%)")
             
             fig.update_layout(
-                title="Hit Rate by Greeks Score",
-                xaxis_title="Greeks Score",
+                title="Hit Rate by Event Score",
+                xaxis_title="Event Score",
                 yaxis_title="+100% Hit Rate (%)",
                 yaxis_range=[0, 100]
             )
@@ -2445,10 +2329,17 @@ def get_high_conviction_anomalies() -> pd.DataFrame:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         cur.execute("""
-            SELECT 
+            SELECT
                 symbol, event_date, direction,
                 total_score, otm_score, total_magnitude,
-                high_conviction_score, is_high_conviction, recommended_option
+                high_conviction_score, is_high_conviction, recommended_option,
+                enrichment_novelty_is_first,
+                enrichment_novelty_count_30d,
+                enrichment_news_has_news,
+                enrichment_news_has_catalyst,
+                enrichment_edgar_has_filings,
+                enrichment_edgar_alignment,
+                enrichment_conviction_modifier
             FROM daily_anomaly_snapshot
             WHERE is_high_conviction = TRUE
               AND total_magnitude >= 20000
@@ -2464,115 +2355,3 @@ def get_high_conviction_anomalies() -> pd.DataFrame:
         conn.close()
 
 
-def create_greeks_symbol_analysis(symbol: str, anomaly_data: Dict, selected_date: date = None) -> None:
-    """Create Greeks-focused analysis for a specific symbol."""
-    st.header(f"Greeks Analysis: {symbol}")
-    
-    # Get historical data
-    history = get_symbol_history(symbol)
-    
-    if history['stock'].empty:
-        st.warning(f"No historical data available for {symbol}")
-        return
-    
-    details = anomaly_data.get('details', {})
-    
-    # High conviction header info
-    hc_score = details.get('high_conviction_score', 0)
-    is_hc = details.get('is_high_conviction', False)
-    recommended_option = details.get('recommended_option', '')
-    direction = details.get('direction', '')
-    
-    # Direction and score
-    dir_display = "BULLISH" if direction == 'call_heavy' else "BEARISH" if direction == 'put_heavy' else direction
-    status = "HIGH CONVICTION" if is_hc else "Below Threshold"
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Greeks Score", f"{hc_score}/4")
-    with col2:
-        st.metric("Status", status)
-    with col3:
-        st.metric("Direction", dir_display)
-    with col4:
-        magnitude = details.get('total_magnitude', 0)
-        st.metric("Magnitude", f"${magnitude:,.0f}")
-    
-    # Recommended option section
-    st.markdown("---")
-    st.subheader("Recommended Option")
-    
-    if recommended_option:
-        option_details = get_recommended_option_details(recommended_option)
-        
-        if option_details:
-            col1, col2, col3, col4, col5 = st.columns(5)
-            
-            with col1:
-                st.metric("Contract", recommended_option)
-            with col2:
-                price = float(option_details.get('close_price', 0) or 0)
-                st.metric("Price", f"${price:.2f}")
-            with col3:
-                volume = int(option_details.get('volume', 0) or 0)
-                st.metric("Volume", f"{volume:,}")
-            with col4:
-                iv = float(option_details.get('implied_volatility', 0) or 0)
-                st.metric("IV", f"{iv:.1%}")
-            with col5:
-                oi = int(option_details.get('open_interest', 0) or 0)
-                st.metric("Open Interest", f"{oi:,}")
-            
-            # Greeks breakdown
-            st.markdown("---")
-            st.subheader("Greeks Factor Analysis")
-            
-            theta = abs(float(option_details.get('greeks_theta', 0) or 0))
-            gamma = float(option_details.get('greeks_gamma', 0) or 0)
-            vega = float(option_details.get('greeks_vega', 0) or 0)
-            delta = float(option_details.get('greeks_delta', 0) or 0)
-            otm_score = details.get('otm_score', 0)
-            
-            theta_pass = theta >= HIGH_CONVICTION_THRESHOLDS['theta']
-            gamma_pass = gamma >= HIGH_CONVICTION_THRESHOLDS['gamma']
-            vega_pass = vega >= HIGH_CONVICTION_THRESHOLDS['vega']
-            otm_pass = otm_score >= HIGH_CONVICTION_THRESHOLDS['otm_score']
-            
-            col1, col2, col3, col4, col5 = st.columns(5)
-            
-            with col1:
-                st.metric("Delta", f"{delta:.4f}")
-            
-            with col2:
-                st.metric("Theta", f"{theta:.4f}",
-                         delta="PASS" if theta_pass else "FAIL",
-                         delta_color="normal" if theta_pass else "inverse")
-            
-            with col3:
-                st.metric("Gamma", f"{gamma:.4f}",
-                         delta="PASS" if gamma_pass else "FAIL",
-                         delta_color="normal" if gamma_pass else "inverse")
-            
-            with col4:
-                st.metric("Vega", f"{vega:.4f}",
-                         delta="PASS" if vega_pass else "FAIL",
-                         delta_color="normal" if vega_pass else "inverse")
-            
-            with col5:
-                st.metric("OTM Score", f"{otm_score:.2f}",
-                         delta="PASS" if otm_pass else "FAIL",
-                         delta_color="normal" if otm_pass else "inverse")
-            
-            # Thresholds reference
-            st.markdown("""
-            **Thresholds (93rd percentile):** 
-            Theta >= 0.1624 | Gamma >= 0.4683 | Vega >= 0.1326 | OTM Score >= 1.4
-            """)
-        else:
-            st.warning(f"Could not fetch details for {recommended_option}")
-    else:
-        st.info("No recommended option available")
-    
-    # Price chart
-    st.markdown("---")
-    create_combined_price_volume_chart(history['stock'], symbol)

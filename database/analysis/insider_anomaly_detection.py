@@ -1,35 +1,82 @@
 #!/usr/bin/env python3
 """
-High-Conviction Insider Trading Anomaly Detection System
+Two-Tier Insider Trading Anomaly Detection System
 
-This system identifies potential insider trading activity using statistical analysis
-of options trading patterns against 30-day baselines.
+TIER 1 — EVENT SCORING (symbol-level, gates alerts):
+  Identifies unusual options activity using volume-based metrics:
+  - volume_score >= threshold (volume anomaly z-score)
+  - z_score >= threshold (raw statistical deviation)
+  - vol_oi_score >= threshold (volume:OI ratio)
+  - magnitude >= threshold (dollar volume, $50K+)
+  Alert gate: 3+ of 4 factors met (is_high_conviction = True)
+  Filters: NOT bot-driven (< 5% intraday move), NOT earnings-related
 
-Scoring System (1-10 scale):
-- Volume Anomaly (0-3): High volume z-score analysis vs baseline (only rewards above-average volume)
-- Volume:Open Interest Ratio (0-2): Volume:OI ratio z-score vs historical baseline (only rewards above-average ratios)
-- OTM Call Concentration (0-2): Short-term out-of-money calls  
-- Directional Bias (0-1): Strong call/put preference
-- Time Pressure (0-2): Near-term expiration clustering
+TIER 2 — CONTRACT SELECTION (contract-level, picks recommended option):
+  Among tradeable contracts ($0.05–$5.00, vol > 50, direction-aligned):
+  - Default strategy: max_volume (highest volume = most liquid)
+  - Greek values stored for informational tracking
 
-Alert Threshold: Score >= 7.5 (high-conviction only)
+Legacy composite score (0-10) still computed and stored for backward compatibility.
 """
 
 import logging
 import time
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import pytz
 from database.core.connection import db
 
 logger = logging.getLogger(__name__)
 
 class InsiderAnomalyDetector:
-    def __init__(self, baseline_days: int = 90):
+    def __init__(self, baseline_days: int = 90, use_model: bool = True):
         self.baseline_days = baseline_days
         # Use EST timezone for all date/time operations
         self.est_tz = pytz.timezone('US/Eastern')
         self.current_date = datetime.now(self.est_tz).date()
+        
+        # ML model for P(TP100) prediction
+        self._tp100_model = None
+        self._use_model = use_model
+        if use_model:
+            self._load_tp100_model()
+    
+    def _load_tp100_model(self) -> bool:
+        """Load the TP100 prediction model if available."""
+        try:
+            from analysis.tp100_model import TP100Model
+            self._tp100_model = TP100Model()
+            if self._tp100_model.load():
+                logger.info(f"Loaded TP100 model version: {self._tp100_model.model_version}")
+                return True
+            else:
+                logger.info("No trained TP100 model available - predictions disabled")
+                self._tp100_model = None
+                return False
+        except Exception as e:
+            logger.warning(f"Failed to load TP100 model: {e}")
+            self._tp100_model = None
+            return False
+    
+    def predict_tp100_probability(self, anomaly_data: Dict) -> Optional[float]:
+        """
+        Predict P(TP100) for an anomaly using the trained model.
+        
+        Args:
+            anomaly_data: Dict with anomaly features
+        
+        Returns:
+            Predicted probability (0-1) or None if model unavailable
+        """
+        if self._tp100_model is None:
+            return None
+        
+        try:
+            result = self._tp100_model.predict(anomaly_data)
+            return result.get('predicted_tp100_prob')
+        except Exception as e:
+            logger.warning(f"TP100 prediction failed: {e}")
+            return None
     
     def run_detection(self) -> Dict[str, Any]:
         """Run high-conviction insider trading anomaly detection (1-10 scoring)."""
@@ -323,14 +370,282 @@ class InsiderAnomalyDetector:
         finally:
             conn.close()
 
-    # High Conviction Scoring Thresholds (93rd percentile from validation analysis)
-    # These are the optimal thresholds for +100% take profit strategy
-    HIGH_CONVICTION_THRESHOLDS = {
-        'theta': 0.1624,    # Absolute value of theta
-        'gamma': 0.4683,
-        'vega': 0.1326,
-        'otm_score': 1.4    # From the anomaly scoring system
+    # =========================================================================
+    # TWO-TIER SCORING ARCHITECTURE
+    # =========================================================================
+    #
+    # TIER 1: EVENT SCORING (symbol-level) — gates whether to alert
+    #   Uses volume-based metrics that are truly predictive of TP100 on the
+    #   recommended contract. These are symbol-level aggregates.
+    #
+    # TIER 2: CONTRACT SELECTION (contract-level) — picks the best option
+    #   Uses Greeks (gamma, risk/reward) to select which contract to recommend.
+    #   Greeks are useful for picking contracts, not for gating events.
+    #
+    # See analysis.py (two-tier validation) for methodology.
+    # =========================================================================
+
+    # TIER 1: Event-level scoring thresholds
+    # These gate whether an event triggers an alert (score >= 3 of 4)
+    EVENT_SCORE_THRESHOLDS = {
+        'volume_score': 2.0,   # Volume anomaly z-score component
+        'z_score': 3.0,        # Raw z-score (statistical deviation from baseline)
+        'vol_oi_score': 1.2,   # Volume:OI ratio score
+        'magnitude': 50000,    # Dollar magnitude ($50K institutional threshold)
     }
+    EVENT_MIN_SCORE = 3  # At least 3 of 4 factors must be met
+
+    # TIER 2: Contract-level thresholds (used for Greeks-informed selection)
+    # These are stored for informational purposes and contract ranking
+    HIGH_CONVICTION_THRESHOLDS = {
+        'gamma': 0.2560,      # Gamma — used for contract selection ranking
+        'vega': 0.2299,       # Vega — used for contract selection ranking
+        'magnitude': 50000,   # Dollar magnitude (shared with event scoring)
+        'vol_oi_score': 1.2,  # Volume:OI ratio score (shared with event scoring)
+    }
+
+    # Legacy thresholds (kept for backward compatibility / tracking)
+    LEGACY_THRESHOLDS = {
+        'theta': 0.2743,
+        'gamma': 0.2560,
+        'vega': 0.2299,
+        'otm_score': 1.2000
+    }
+    
+    # Contract selection strategies
+    CONTRACT_SELECTION_STRATEGIES = ['max_volume', 'max_gamma', 'best_rr', 'atm_preference', 'model_ranked']
+    
+    def _score_single_contract(self, contract: Dict, otm_score: float, underlying_price: float = None,
+                                magnitude: float = 0, vol_oi_score: float = 0) -> Dict:
+        """
+        Score a single contract based on Greeks and symbol-level metrics.
+        
+        Updated scoring based on statistical validation:
+        - gamma + vega + magnitude + vol_oi_score is the optimal combination
+        Returns dict with all scoring components for the contract.
+        """
+        theta = abs(float(contract.get('greeks_theta') or 0))
+        gamma = float(contract.get('greeks_gamma') or 0)
+        vega = float(contract.get('greeks_vega') or 0)
+        
+        # New optimized scoring factors
+        gamma_met = gamma >= self.HIGH_CONVICTION_THRESHOLDS['gamma']
+        vega_met = vega >= self.HIGH_CONVICTION_THRESHOLDS['vega']
+        magnitude_met = magnitude >= self.HIGH_CONVICTION_THRESHOLDS['magnitude']
+        vol_oi_met = vol_oi_score >= self.HIGH_CONVICTION_THRESHOLDS['vol_oi_score']
+        
+        # New high conviction score (0-4) based on optimal factors
+        greeks_score = sum([gamma_met, vega_met, magnitude_met, vol_oi_met])
+        
+        # Legacy scoring for backward compatibility
+        theta_met = theta >= self.LEGACY_THRESHOLDS['theta']
+        otm_met = otm_score >= self.LEGACY_THRESHOLDS['otm_score']
+        
+        strike = float(contract.get('strike_price') or 0)
+        moneyness = strike / underlying_price if underlying_price and underlying_price > 0 else None
+        
+        risk_reward = (gamma * vega / abs(theta)) if abs(theta) > 0.001 else 0
+        
+        return {
+            'contract_ticker': contract.get('contract_ticker'),
+            'contract_type': contract.get('contract_type'),
+            'strike_price': strike,
+            'expiration_date': str(contract.get('expiration_date')) if contract.get('expiration_date') else None,
+            'session_volume': contract.get('session_volume') or 0,
+            'session_close': contract.get('session_close') or 0,
+            'theta': theta,
+            'gamma': gamma,
+            'vega': vega,
+            # New optimized factors
+            'gamma_met': gamma_met,
+            'vega_met': vega_met,
+            'magnitude_met': magnitude_met,
+            'vol_oi_met': vol_oi_met,
+            # Legacy factors (for backward compatibility)
+            'theta_met': theta_met,
+            'otm_met': otm_met,
+            'greeks_score': greeks_score,
+            'moneyness': moneyness,
+            'risk_reward': risk_reward,
+            'atm_distance': abs(moneyness - 1.0) if moneyness else 999,
+        }
+    
+    def _calculate_high_conviction_score_multi(self, contracts: List[Dict], direction: str, otm_score: float, 
+                                                underlying_price: float = None, 
+                                                selection_strategy: str = 'max_volume',
+                                                top_n: int = 3,
+                                                magnitude: float = 0,
+                                                vol_oi_score: float = 0) -> tuple:
+        """
+        Calculate high conviction score with multi-contract analysis.
+        
+        Two-tier system: event-level scoring (volume_score, z_score, vol_oi_score, magnitude)
+        gates alerts; contract selection picks the recommended option.
+
+        Returns tuple of:
+        - high_conviction_score (0-4)
+        - is_high_conviction (bool)
+        - recommended_option (str)
+        - component_flags (dict)
+        - greek_values (dict)
+        - contract_candidates (list of top N contracts with scores)
+        - best_contracts (dict with best_gamma, best_theta, best_rr tickers)
+        - selection_strategy (str)
+        """
+        if direction == 'call_heavy':
+            eligible_contracts = [c for c in contracts if c['contract_type'] == 'call']
+        elif direction == 'put_heavy':
+            eligible_contracts = [c for c in contracts if c['contract_type'] == 'put']
+        else:
+            eligible_contracts = contracts
+        
+        tradeable_contracts = [
+            c for c in eligible_contracts 
+            if 0.05 <= (c.get('session_close') or 0) <= 5.00 
+            and (c.get('session_volume') or 0) > 50
+        ]
+        
+        empty_result = (
+            0, False, None, 
+            {'gamma': False, 'vega': False, 'magnitude': False, 'vol_oi': False}, 
+            {},
+            [],
+            {'best_gamma': None, 'best_theta': None, 'best_rr': None},
+            selection_strategy
+        )
+        
+        if not tradeable_contracts:
+            return empty_result
+        
+        scored_contracts = []
+        for c in tradeable_contracts:
+            score_data = self._score_single_contract(c, otm_score, underlying_price, magnitude, vol_oi_score)
+            scored_contracts.append(score_data)
+        
+        for i, sc in enumerate(sorted(scored_contracts, key=lambda x: x['session_volume'], reverse=True)):
+            sc['rank_volume'] = i + 1
+        for i, sc in enumerate(sorted(scored_contracts, key=lambda x: x['gamma'], reverse=True)):
+            sc['rank_gamma'] = i + 1
+        for i, sc in enumerate(sorted(scored_contracts, key=lambda x: x['risk_reward'], reverse=True)):
+            sc['rank_rr'] = i + 1
+        for i, sc in enumerate(sorted(scored_contracts, key=lambda x: x['atm_distance'])):
+            sc['rank_atm'] = i + 1
+        
+        best_by_volume = min(scored_contracts, key=lambda x: x['rank_volume'])
+        best_by_gamma = min(scored_contracts, key=lambda x: x['rank_gamma'])
+        best_by_rr = min(scored_contracts, key=lambda x: x['rank_rr'])
+        best_by_atm = min(scored_contracts, key=lambda x: x['rank_atm'])
+        best_by_theta = max(scored_contracts, key=lambda x: x['theta'])
+        
+        best_contracts = {
+            'best_gamma': best_by_gamma['contract_ticker'],
+            'best_theta': best_by_theta['contract_ticker'],
+            'best_rr': best_by_rr['contract_ticker'],
+        }
+        
+        # Model-ranked selection requires TP100 model predictions
+        if selection_strategy == 'model_ranked' and self._tp100_model is not None:
+            # Score each contract with the model
+            for sc in scored_contracts:
+                contract_features = {
+                    'greeks_theta_value': sc['theta'],
+                    'greeks_gamma_value': sc['gamma'],
+                    'greeks_vega_value': sc['vega'],
+                    'greeks_theta_met': sc['theta_met'],
+                    'greeks_gamma_met': sc['gamma_met'],
+                    'greeks_vega_met': sc['vega_met'],
+                    'greeks_otm_met': sc['otm_met'],
+                    'moneyness': sc['moneyness'],
+                    'otm_score': otm_score,
+                }
+                pred = self._tp100_model.predict(contract_features)
+                sc['predicted_tp100'] = pred.get('predicted_tp100_prob', 0)
+            
+            best_by_model = max(scored_contracts, key=lambda x: x.get('predicted_tp100', 0))
+            selected = best_by_model
+        elif selection_strategy == 'max_gamma':
+            selected = best_by_gamma
+        elif selection_strategy == 'best_rr':
+            selected = best_by_rr
+        elif selection_strategy == 'atm_preference':
+            selected = best_by_atm
+        else:
+            selected = best_by_volume
+            selection_strategy = 'max_volume'
+        
+        recommended_option = selected['contract_ticker']
+        
+        # New optimized component flags (gamma + vega + magnitude + vol_oi)
+        component_flags = {
+            'gamma': selected['gamma_met'],
+            'vega': selected['vega_met'],
+            'magnitude': selected['magnitude_met'],
+            'vol_oi': selected['vol_oi_met'],
+            # Legacy flags for backward compatibility
+            'theta': selected['theta_met'],
+            'otm': selected['otm_met'],
+        }
+        
+        score = selected['greeks_score']
+        is_high_conviction = score >= 3
+        
+        def calc_percentile(value: float, threshold: float) -> float:
+            if value <= 0:
+                return 0.0
+            if value >= threshold:
+                pct = 95.0 + min(((value - threshold) / threshold) * 5.0, 5.0)
+            else:
+                pct = (value / threshold) * 95.0
+            return round(pct, 2)
+        
+        greek_values = {
+            'gamma': selected['gamma'],
+            'vega': selected['vega'],
+            'magnitude': magnitude,
+            'vol_oi_score': vol_oi_score,
+            # Percentiles based on new thresholds
+            'gamma_percentile': calc_percentile(selected['gamma'], self.HIGH_CONVICTION_THRESHOLDS['gamma']),
+            'vega_percentile': calc_percentile(selected['vega'], self.HIGH_CONVICTION_THRESHOLDS['vega']),
+            'magnitude_percentile': calc_percentile(magnitude, self.HIGH_CONVICTION_THRESHOLDS['magnitude']),
+            'vol_oi_percentile': calc_percentile(vol_oi_score, self.HIGH_CONVICTION_THRESHOLDS['vol_oi_score']),
+            # Legacy values
+            'theta': selected['theta'],
+            'otm': otm_score,
+            'moneyness': selected['moneyness'],
+            'risk_reward': selected['risk_reward'],
+        }
+        
+        sorted_by_score = sorted(scored_contracts, key=lambda x: (-x['greeks_score'], -x['session_volume']))
+        contract_candidates = []
+        for sc in sorted_by_score[:top_n]:
+            contract_candidates.append({
+                'ticker': sc['contract_ticker'],
+                'type': sc['contract_type'],
+                'strike': sc['strike_price'],
+                'expiry': sc['expiration_date'],
+                'price': sc['session_close'],
+                'volume': sc['session_volume'],
+                'gamma': round(sc['gamma'], 6) if sc['gamma'] else None,
+                'theta': round(sc['theta'], 6) if sc['theta'] else None,
+                'vega': round(sc['vega'], 6) if sc['vega'] else None,
+                'moneyness': round(sc['moneyness'], 4) if sc['moneyness'] else None,
+                'greeks_score': sc['greeks_score'],
+                'risk_reward': round(sc['risk_reward'], 4) if sc['risk_reward'] else None,
+                'rank_volume': sc.get('rank_volume'),
+                'rank_gamma': sc.get('rank_gamma'),
+                'rank_rr': sc.get('rank_rr'),
+            })
+        
+        return (
+            score, 
+            is_high_conviction, 
+            recommended_option, 
+            component_flags, 
+            greek_values,
+            contract_candidates,
+            best_contracts,
+            selection_strategy
+        )
     
     def _calculate_high_conviction_score(self, contracts: List[Dict], direction: str, otm_score: float) -> tuple:
         """
@@ -345,90 +660,11 @@ class InsiderAnomalyDetector:
         - OTM Score >= 1.4
         
         High conviction: score >= 3 (at least 3 of 4 factors)
+        
+        NOTE: This is the legacy interface. Use _calculate_high_conviction_score_multi for full functionality.
         """
-        # Filter contracts by direction and find the best option
-        if direction == 'call_heavy':
-            eligible_contracts = [c for c in contracts if c['contract_type'] == 'call']
-        elif direction == 'put_heavy':
-            eligible_contracts = [c for c in contracts if c['contract_type'] == 'put']
-        else:
-            eligible_contracts = contracts
-        
-        # Further filter by price range ($0.05-$5.00) and volume > 50
-        tradeable_contracts = [
-            c for c in eligible_contracts 
-            if 0.05 <= (c.get('session_close') or 0) <= 5.00 
-            and (c.get('session_volume') or 0) > 50
-        ]
-        
-        empty_result = (0, False, None, {'theta': False, 'gamma': False, 'vega': False, 'otm': False}, {})
-        if not tradeable_contracts:
-            return empty_result
-        
-        # Find the highest volume option among tradeable contracts
-        best_option = max(tradeable_contracts, key=lambda x: x.get('session_volume') or 0)
-        recommended_option = best_option.get('contract_ticker')
-        
-        # Calculate high conviction score based on Greeks of the best option
-        score = 0
-        component_flags = {}
-        greek_values = {}
-        
-        # Helper function to calculate percentile (approximate)
-        def calc_percentile(value: float, threshold: float) -> float:
-            """Calculate approximate percentile. Threshold = 93rd percentile."""
-            if value <= 0:
-                return 0.0
-            if value >= threshold:
-                # Above threshold: scale from 93-100
-                pct = 93.0 + min(((value - threshold) / threshold) * 7.0, 7.0)
-            else:
-                # Below threshold: scale from 0-93
-                pct = (value / threshold) * 93.0
-            return round(pct, 2)
-        
-        # Theta check (use absolute value)
-        theta = abs(float(best_option.get('greeks_theta') or 0))
-        theta_met = theta >= self.HIGH_CONVICTION_THRESHOLDS['theta']
-        theta_pct = calc_percentile(theta, self.HIGH_CONVICTION_THRESHOLDS['theta'])
-        component_flags['theta'] = theta_met
-        greek_values['theta'] = theta
-        greek_values['theta_percentile'] = theta_pct
-        if theta_met:
-            score += 1
-        
-        # Gamma check
-        gamma = float(best_option.get('greeks_gamma') or 0)
-        gamma_met = gamma >= self.HIGH_CONVICTION_THRESHOLDS['gamma']
-        gamma_pct = calc_percentile(gamma, self.HIGH_CONVICTION_THRESHOLDS['gamma'])
-        component_flags['gamma'] = gamma_met
-        greek_values['gamma'] = gamma
-        greek_values['gamma_percentile'] = gamma_pct
-        if gamma_met:
-            score += 1
-        
-        # Vega check
-        vega = float(best_option.get('greeks_vega') or 0)
-        vega_met = vega >= self.HIGH_CONVICTION_THRESHOLDS['vega']
-        vega_pct = calc_percentile(vega, self.HIGH_CONVICTION_THRESHOLDS['vega'])
-        component_flags['vega'] = vega_met
-        greek_values['vega'] = vega
-        greek_values['vega_percentile'] = vega_pct
-        if vega_met:
-            score += 1
-        
-        # OTM Score check (from anomaly-level calculation)
-        otm_met = otm_score >= self.HIGH_CONVICTION_THRESHOLDS['otm_score']
-        otm_pct = calc_percentile(otm_score, self.HIGH_CONVICTION_THRESHOLDS['otm_score'])
-        component_flags['otm'] = otm_met
-        greek_values['otm'] = otm_score
-        greek_values['otm_percentile'] = otm_pct
-        if otm_met:
-            score += 1
-        
-        is_high_conviction = score >= 3
-        
-        return (score, is_high_conviction, recommended_option, component_flags, greek_values)
+        result = self._calculate_high_conviction_score_multi(contracts, direction, otm_score)
+        return (result[0], result[1], result[2], result[3], result[4])
     
     def _detect_high_conviction_insider_activity(self, data: List[Dict], baseline: Dict) -> Dict[str, Dict]:
         """
@@ -554,14 +790,46 @@ class InsiderAnomalyDetector:
             else:
                 direction = 'mixed'
             
-            # Calculate high conviction score based on option Greeks
-            high_conviction_score, is_high_conviction, recommended_option, component_flags, greek_values = self._calculate_high_conviction_score(
-                contracts, direction, otm_score
+            # Get underlying price for moneyness calculation (from first contract with valid price)
+            underlying_price = None
+            for c in contracts:
+                if c.get('underlying_price'):
+                    underlying_price = float(c['underlying_price'])
+                    break
+            
+            # Get configured contract selection strategy
+            try:
+                from config.contract_selection import get_active_strategy
+                active_strategy = get_active_strategy().value
+            except ImportError:
+                active_strategy = 'max_volume'
+            
+            # Calculate high conviction score with multi-contract analysis
+            # Pass magnitude and vol_oi_score for the new optimized scoring
+            (high_conviction_score, is_high_conviction, recommended_option, 
+             component_flags, greek_values, contract_candidates, 
+             best_contracts, selection_strategy) = self._calculate_high_conviction_score_multi(
+                contracts, direction, otm_score, underlying_price, 
+                selection_strategy=active_strategy,
+                magnitude=total_magnitude,
+                vol_oi_score=volume_oi_ratio_score
             )
             
             # Get intraday price move for this symbol (for bot-driven detection)
             intraday_price_move_pct = intraday_moves.get(symbol, 0.0)
-            
+
+            # =========================================================
+            # TIER 1: EVENT-LEVEL SCORING (volume-based, symbol-level)
+            # This gates whether the event triggers an alert.
+            # =========================================================
+            event_volume_met = volume_score >= self.EVENT_SCORE_THRESHOLDS['volume_score']
+            event_z_score_met = max_z_score >= self.EVENT_SCORE_THRESHOLDS['z_score']
+            event_vol_oi_met = volume_oi_ratio_score >= self.EVENT_SCORE_THRESHOLDS['vol_oi_score']
+            event_magnitude_met = total_magnitude >= self.EVENT_SCORE_THRESHOLDS['magnitude']
+
+            event_score = sum([event_volume_met, event_z_score_met, event_vol_oi_met, event_magnitude_met])
+            is_high_conviction_event = event_score >= self.EVENT_MIN_SCORE
+
             # Store ALL scores in database for historical tracking
             anomaly_data = {
                 'symbol': symbol,
@@ -569,9 +837,10 @@ class InsiderAnomalyDetector:
                 'total_volume': total_volume,  # Add total_volume at top level for email filtering
                 'total_magnitude': total_magnitude,  # Add total_magnitude for filtering
                 'intraday_price_move_pct': intraday_price_move_pct,  # For bot-driven detection
-                'high_conviction_score': high_conviction_score,  # New high conviction scoring (0-4)
-                'is_high_conviction': is_high_conviction,  # Score >= 3
-                'recommended_option': recommended_option,  # Best tradeable option ticker
+                # EVENT SCORE drives is_high_conviction (not Greeks)
+                'high_conviction_score': event_score,  # Event-level score (0-4)
+                'is_high_conviction': is_high_conviction_event,  # Event score >= 3
+                'recommended_option': recommended_option,  # Best tradeable option (selected by Greeks)
                 'greeks_theta_met': component_flags.get('theta', False),  # Individual greek components
                 'greeks_gamma_met': component_flags.get('gamma', False),
                 'greeks_vega_met': component_flags.get('vega', False),
@@ -584,6 +853,12 @@ class InsiderAnomalyDetector:
                 'greeks_gamma_percentile': greek_values.get('gamma_percentile'),
                 'greeks_vega_percentile': greek_values.get('vega_percentile'),
                 'greeks_otm_percentile': greek_values.get('otm_percentile'),
+                # NEW: Multi-contract scoring fields
+                'contract_candidates': contract_candidates,  # Top N contracts with scores (JSON)
+                'best_gamma_contract': best_contracts.get('best_gamma'),
+                'best_theta_contract': best_contracts.get('best_theta'),
+                'best_rr_contract': best_contracts.get('best_rr'),
+                'contract_selection_strategy': selection_strategy,
                 'anomaly_types': ['insider_activity'] if rounded_composite_score >= 7.5 and total_magnitude >= 20000 else ['low_score_activity'],
                 'total_anomalies': 1,
                 'details': {
@@ -617,26 +892,35 @@ class InsiderAnomalyDetector:
             
             # Collect all anomaly data for bulk processing
             all_anomaly_data.append(anomaly_data)
-            
-            # Flag for notifications: EITHER greeks-based high conviction OR legacy high score (both need sufficient magnitude)
-            # Greeks-based (score >= 3/4) OR legacy composite (score >= 7.5) - both require $20K+ magnitude
-            meets_greeks_threshold = is_high_conviction  # Greeks score >= 3
-            meets_legacy_threshold = rounded_composite_score >= 7.5
+
+            # Flag for notifications: event-level scoring gates alerts
+            # Event score >= 3 AND magnitude >= $20K (magnitude is also in event score, but enforce floor)
+            meets_event_threshold = is_high_conviction_event  # Event score >= 3
             meets_magnitude_threshold = total_magnitude >= 20000
-            
-            if (meets_greeks_threshold or meets_legacy_threshold) and meets_magnitude_threshold:
+
+            if meets_event_threshold and meets_magnitude_threshold:
                 high_conviction_symbols[symbol] = anomaly_data
-                if meets_greeks_threshold:
-                    logger.debug(f"[ALERT CANDIDATE] {symbol}: Greeks {high_conviction_score}/4 (high_conviction)")
-                if meets_legacy_threshold:
-                    logger.debug(f"[ALERT CANDIDATE] {symbol}: Legacy {rounded_composite_score}/10")
+                logger.debug(
+                    f"[ALERT CANDIDATE] {symbol}: Event score {event_score}/4 "
+                    f"(vol={event_volume_met}, z={event_z_score_met}, "
+                    f"voi={event_vol_oi_met}, mag={event_magnitude_met}) "
+                    f"| Contract: {recommended_option} (strategy={selection_strategy})"
+                )
         
-        # Bulk store all anomaly data
+        # Enrich anomaly data with additional features before storing
         if all_anomaly_data:
+            logger.info(f"Enriching {len(all_anomaly_data)} anomalies with additional features...")
+            all_anomaly_data = self.enrich_anomalies_with_features(all_anomaly_data)
+            
+            # Update high_conviction_symbols with enriched data
+            for anomaly in all_anomaly_data:
+                if anomaly['symbol'] in high_conviction_symbols:
+                    high_conviction_symbols[anomaly['symbol']] = anomaly
+            
             stored_count = self._store_anomalies_bulk(all_anomaly_data)
             logger.info(f"Bulk stored {stored_count} anomaly records in database")
         
-        logger.info(f"Analysis complete: {len(high_conviction_symbols)} symbols scored >= 7.5 out of {len(symbol_data)} analyzed. All scores stored in database.")
+        logger.info(f"Analysis complete: {len(high_conviction_symbols)} high-conviction events (event score >= {self.EVENT_MIN_SCORE}) out of {len(symbol_data)} symbols analyzed.")
         return high_conviction_symbols
     
     def _calculate_volume_anomaly_score_v2(self, call_volume: int, put_volume: int, call_baseline: Dict, put_baseline: Dict) -> float:
@@ -866,8 +1150,219 @@ class InsiderAnomalyDetector:
         # High scores for concentration in near-term expirations
         score = (this_week_ratio * 1.2) + (short_term_ratio * 0.8)  # Max 2.0
         return min(score, 2.0)
-
-
+    
+    def _compute_cross_sectional_rank(self, all_anomalies: List[Dict]) -> Dict[str, float]:
+        """
+        Compute cross-sectional percentile rank for each symbol's volume z-score.
+        
+        Args:
+            all_anomalies: List of all anomaly data dicts for the day
+        
+        Returns:
+            Dict mapping symbol to percentile rank (0-100)
+        """
+        if not all_anomalies:
+            return {}
+        
+        z_scores = []
+        for a in all_anomalies:
+            z = a.get('details', {}).get('z_score', 0)
+            z_scores.append((a['symbol'], z))
+        
+        z_scores.sort(key=lambda x: x[1])
+        n = len(z_scores)
+        
+        ranks = {}
+        for i, (symbol, _) in enumerate(z_scores):
+            ranks[symbol] = (i / (n - 1)) * 100 if n > 1 else 50.0
+        
+        return ranks
+    
+    def _get_historical_tp100_rates(self, symbols: List[str], lookback_days: int = 90) -> Dict[str, Dict]:
+        """
+        Get historical TP100 hit rates for symbols.
+        
+        Args:
+            symbols: List of symbols to check
+            lookback_days: Number of days to look back
+        
+        Returns:
+            Dict mapping symbol to {rate, signal_count}
+        """
+        if not symbols:
+            return {}
+        
+        conn = db.connect()
+        try:
+            with conn.cursor() as cur:
+                placeholders = ','.join(['%s'] * len(symbols))
+                
+                cur.execute(f"""
+                    WITH historical_signals AS (
+                        SELECT 
+                            a.symbol,
+                            a.event_date,
+                            a.recommended_option,
+                            o_entry.close_price AS entry_price,
+                            (
+                                SELECT MAX(o_future.close_price)
+                                FROM daily_option_snapshot o_future
+                                WHERE o_future.contract_ticker = a.recommended_option
+                                  AND o_future.date > a.event_date
+                            ) AS max_future_price
+                        FROM daily_anomaly_snapshot a
+                        LEFT JOIN daily_option_snapshot o_entry
+                            ON a.recommended_option = o_entry.contract_ticker
+                            AND a.event_date = o_entry.date
+                        WHERE a.symbol IN ({placeholders})
+                          AND a.event_date >= CURRENT_DATE - INTERVAL '%s days'
+                          AND a.event_date < CURRENT_DATE
+                          AND a.is_high_conviction = TRUE
+                          AND a.recommended_option IS NOT NULL
+                    )
+                    SELECT 
+                        symbol,
+                        COUNT(*) AS signal_count,
+                        SUM(CASE WHEN max_future_price >= 2.0 * entry_price THEN 1 ELSE 0 END) AS tp100_count
+                    FROM historical_signals
+                    WHERE entry_price IS NOT NULL AND entry_price > 0
+                    GROUP BY symbol
+                """, (*symbols, lookback_days))
+                
+                results = {}
+                for row in cur.fetchall():
+                    symbol, signal_count, tp100_count = row
+                    rate = tp100_count / signal_count if signal_count > 0 else None
+                    results[symbol] = {
+                        'rate': rate,
+                        'signal_count': signal_count,
+                        'tp100_count': tp100_count
+                    }
+                
+                for symbol in symbols:
+                    if symbol not in results:
+                        results[symbol] = {'rate': None, 'signal_count': 0, 'tp100_count': 0}
+                
+                return results
+        finally:
+            conn.close()
+    
+    def _get_contract_features(self, contract_ticker: str, event_date) -> Dict[str, Any]:
+        """
+        Get additional features for a specific contract.
+        
+        Args:
+            contract_ticker: The option contract ticker
+            event_date: The event date
+        
+        Returns:
+            Dict with moneyness, days_to_expiry, iv_percentile, gamma_theta_ratio
+        """
+        conn = db.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 
+                        oc.strike_price,
+                        oc.expiration_date,
+                        o.implied_volatility,
+                        o.greeks_gamma,
+                        o.greeks_theta,
+                        COALESCE(s.close, s.weighted_average_price) AS underlying_price
+                    FROM option_contracts oc
+                    LEFT JOIN daily_option_snapshot o 
+                        ON oc.contract_ticker = o.contract_ticker AND o.date = %s
+                    LEFT JOIN daily_stock_snapshot s
+                        ON oc.underlying_ticker = s.symbol AND s.date = %s
+                    WHERE oc.contract_ticker = %s
+                """, (event_date, event_date, contract_ticker))
+                
+                row = cur.fetchone()
+                if not row:
+                    return {}
+                
+                strike, expiry, iv, gamma, theta, underlying = row
+                
+                features = {}
+                
+                if underlying and underlying > 0 and strike:
+                    features['moneyness'] = float(strike) / float(underlying)
+                    features['underlying_price'] = float(underlying)
+                
+                if expiry:
+                    if isinstance(expiry, str):
+                        from datetime import datetime
+                        expiry = datetime.strptime(expiry, '%Y-%m-%d').date()
+                    features['days_to_expiry'] = (expiry - event_date).days
+                
+                if gamma is not None and theta is not None and abs(theta) > 0.001:
+                    features['gamma_theta_ratio'] = float(gamma) / abs(float(theta))
+                
+                if iv is not None:
+                    cur.execute("""
+                        SELECT 
+                            PERCENT_RANK() OVER (ORDER BY implied_volatility) * 100 AS iv_pct
+                        FROM daily_option_snapshot
+                        WHERE contract_ticker = %s
+                          AND date <= %s
+                          AND implied_volatility IS NOT NULL
+                        ORDER BY date DESC
+                        LIMIT 1
+                    """, (contract_ticker, event_date))
+                    iv_row = cur.fetchone()
+                    if iv_row:
+                        features['iv_percentile'] = iv_row[0]
+                
+                return features
+        finally:
+            conn.close()
+    
+    def enrich_anomalies_with_features(self, anomalies_data: List[Dict]) -> List[Dict]:
+        """
+        Enrich anomaly data with additional computed features.
+        
+        Args:
+            anomalies_data: List of anomaly dicts to enrich
+        
+        Returns:
+            Enriched list with additional feature columns
+        """
+        if not anomalies_data:
+            return anomalies_data
+        
+        volume_ranks = self._compute_cross_sectional_rank(anomalies_data)
+        
+        symbols = [a['symbol'] for a in anomalies_data]
+        historical_rates = self._get_historical_tp100_rates(symbols)
+        
+        for anomaly in anomalies_data:
+            symbol = anomaly['symbol']
+            
+            anomaly['volume_rank_percentile'] = volume_ranks.get(symbol)
+            
+            hist = historical_rates.get(symbol, {})
+            anomaly['historical_tp100_rate'] = hist.get('rate')
+            anomaly['historical_signal_count'] = hist.get('signal_count', 0)
+            
+            if anomaly.get('recommended_option'):
+                contract_features = self._get_contract_features(
+                    anomaly['recommended_option'], 
+                    self.current_date
+                )
+                anomaly['moneyness'] = contract_features.get('moneyness')
+                anomaly['days_to_expiry'] = contract_features.get('days_to_expiry')
+                anomaly['iv_percentile'] = contract_features.get('iv_percentile')
+                anomaly['gamma_theta_ratio'] = contract_features.get('gamma_theta_ratio')
+                anomaly['underlying_price'] = contract_features.get('underlying_price')
+        
+        # Add model predictions if model is available
+        if self._tp100_model is not None:
+            logger.info("Adding TP100 model predictions...")
+            for anomaly in anomalies_data:
+                prob = self.predict_tp100_probability(anomaly)
+                anomaly['predicted_tp100_prob'] = prob
+        
+        return anomalies_data
 
     def _store_anomalies_bulk(self, anomalies_data: List[Dict]) -> int:
         """Store multiple anomaly records in bulk using execute_values for efficiency."""
@@ -925,7 +1420,11 @@ class InsiderAnomalyDetector:
                         logger.warning(f"Capped call/put ratio for {anomaly_data['symbol']}: {original_ratio:.2f} -> 9999.9999")
                     
                     
-                    # Prepare row data (including new high conviction columns)
+                    # Convert contract_candidates to JSON string
+                    import json
+                    contract_candidates_json = json.dumps(anomaly_data.get('contract_candidates')) if anomaly_data.get('contract_candidates') else None
+                    
+                    # Prepare row data (including high conviction, multi-contract, and feature columns)
                     row_data = (
                         self.current_date,
                         anomaly_data['symbol'],
@@ -960,21 +1459,38 @@ class InsiderAnomalyDetector:
                         details.get('call_magnitude', 0),  # call_magnitude
                         details.get('put_magnitude', 0),  # put_magnitude
                         details.get('total_magnitude', 0),  # total_magnitude
-                        anomaly_data.get('high_conviction_score', 0),  # NEW: high conviction score (0-4)
-                        anomaly_data.get('is_high_conviction', False),  # NEW: flag for score >= 3
-                        anomaly_data.get('recommended_option'),  # NEW: best tradeable option ticker
-                        anomaly_data.get('greeks_theta_met', False),  # NEW: individual component flags
+                        anomaly_data.get('high_conviction_score', 0),  # high conviction score (0-4)
+                        anomaly_data.get('is_high_conviction', False),  # flag for score >= 3
+                        anomaly_data.get('recommended_option'),  # best tradeable option ticker
+                        anomaly_data.get('greeks_theta_met', False),  # individual component flags
                         anomaly_data.get('greeks_gamma_met', False),
                         anomaly_data.get('greeks_vega_met', False),
                         anomaly_data.get('greeks_otm_met', False),
-                        anomaly_data.get('greeks_theta_value'),  # NEW: actual greek values
+                        anomaly_data.get('greeks_theta_value'),  # actual greek values
                         anomaly_data.get('greeks_gamma_value'),
                         anomaly_data.get('greeks_vega_value'),
                         anomaly_data.get('greeks_otm_value'),
-                        anomaly_data.get('greeks_theta_percentile'),  # NEW: percentiles (0-100)
+                        anomaly_data.get('greeks_theta_percentile'),  # percentiles (0-100)
                         anomaly_data.get('greeks_gamma_percentile'),
                         anomaly_data.get('greeks_vega_percentile'),
                         anomaly_data.get('greeks_otm_percentile'),
+                        # Multi-contract scoring columns
+                        contract_candidates_json,  # JSON array of top N contracts
+                        anomaly_data.get('best_gamma_contract'),
+                        anomaly_data.get('best_theta_contract'),
+                        anomaly_data.get('best_rr_contract'),
+                        anomaly_data.get('contract_selection_strategy', 'max_volume'),
+                        # Feature engineering columns
+                        anomaly_data.get('volume_rank_percentile'),
+                        anomaly_data.get('historical_tp100_rate'),
+                        anomaly_data.get('historical_signal_count', 0),
+                        anomaly_data.get('moneyness'),
+                        anomaly_data.get('days_to_expiry'),
+                        anomaly_data.get('iv_percentile'),
+                        anomaly_data.get('gamma_theta_ratio'),
+                        anomaly_data.get('underlying_price'),
+                        # Model prediction
+                        anomaly_data.get('predicted_tp100_prob'),
                         datetime.now(self.est_tz)
                     )
                     bulk_data.append(row_data)
@@ -996,7 +1512,11 @@ class InsiderAnomalyDetector:
                         greeks_theta_met, greeks_gamma_met, greeks_vega_met, greeks_otm_met,
                         greeks_theta_value, greeks_gamma_value, greeks_vega_value, greeks_otm_value,
                         greeks_theta_percentile, greeks_gamma_percentile, greeks_vega_percentile, greeks_otm_percentile,
-                        as_of_timestamp
+                        contract_candidates, best_gamma_contract, best_theta_contract, best_rr_contract,
+                        contract_selection_strategy,
+                        volume_rank_percentile, historical_tp100_rate, historical_signal_count,
+                        moneyness, days_to_expiry, iv_percentile, gamma_theta_ratio, underlying_price,
+                        predicted_tp100_prob, as_of_timestamp
                     ) VALUES %s
                     ON CONFLICT (event_date, symbol)
                     DO UPDATE SET
@@ -1046,6 +1566,20 @@ class InsiderAnomalyDetector:
                         greeks_gamma_percentile = EXCLUDED.greeks_gamma_percentile,
                         greeks_vega_percentile = EXCLUDED.greeks_vega_percentile,
                         greeks_otm_percentile = EXCLUDED.greeks_otm_percentile,
+                        contract_candidates = EXCLUDED.contract_candidates,
+                        best_gamma_contract = EXCLUDED.best_gamma_contract,
+                        best_theta_contract = EXCLUDED.best_theta_contract,
+                        best_rr_contract = EXCLUDED.best_rr_contract,
+                        contract_selection_strategy = EXCLUDED.contract_selection_strategy,
+                        volume_rank_percentile = EXCLUDED.volume_rank_percentile,
+                        historical_tp100_rate = EXCLUDED.historical_tp100_rate,
+                        historical_signal_count = EXCLUDED.historical_signal_count,
+                        moneyness = EXCLUDED.moneyness,
+                        days_to_expiry = EXCLUDED.days_to_expiry,
+                        iv_percentile = EXCLUDED.iv_percentile,
+                        gamma_theta_ratio = EXCLUDED.gamma_theta_ratio,
+                        underlying_price = EXCLUDED.underlying_price,
+                        predicted_tp100_prob = EXCLUDED.predicted_tp100_prob,
                         as_of_timestamp = EXCLUDED.as_of_timestamp,
                         updated_at = CURRENT_TIMESTAMP
                 """
@@ -1060,6 +1594,219 @@ class InsiderAnomalyDetector:
             logger.error(f"Failed to bulk store anomalies: {e}")
             conn.rollback()
             return 0
+        finally:
+            conn.close()
+    
+    def store_enrichment_data(self, symbol: str, event_date, enrichment: Dict[str, Any]) -> bool:
+        """
+        Store enrichment results (novelty, news, EDGAR, conviction modifier)
+        into the daily_anomaly_snapshot row for this symbol/event_date.
+
+        Called after detection, only for high-conviction alerts.
+        """
+        import json
+        conn = self.db.connect()
+        try:
+            with conn.cursor() as cur:
+                news = enrichment.get('news', {})
+                edgar = enrichment.get('edgar', {})
+                novelty = enrichment.get('novelty', {})
+                modifiers = enrichment.get('conviction_modifiers', {})
+
+                cur.execute("""
+                    UPDATE daily_anomaly_snapshot SET
+                        enrichment_novelty_is_first = %s,
+                        enrichment_novelty_count_30d = %s,
+                        enrichment_novelty_score = %s,
+                        enrichment_news_has_news = %s,
+                        enrichment_news_count = %s,
+                        enrichment_news_has_catalyst = %s,
+                        enrichment_edgar_has_filings = %s,
+                        enrichment_edgar_filing_count = %s,
+                        enrichment_edgar_alignment = %s,
+                        enrichment_conviction_modifier = %s,
+                        enrichment_enriched_at = NOW(),
+                        enrichment_raw_json = %s
+                    WHERE event_date = %s AND symbol = %s
+                """, (
+                    novelty.get('is_first_trigger'),
+                    novelty.get('trigger_count_30d'),
+                    novelty.get('novelty_score'),
+                    news.get('has_news'),
+                    news.get('news_count'),
+                    news.get('has_catalyst_news'),
+                    edgar.get('has_filings'),
+                    edgar.get('filing_count'),
+                    edgar.get('insider_alignment'),
+                    modifiers.get('net_modifier'),
+                    json.dumps(enrichment, default=str),
+                    event_date,
+                    symbol,
+                ))
+                conn.commit()
+                logger.info(f"Stored enrichment for {symbol}: modifier={modifiers.get('net_modifier', 'N/A')}")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to store enrichment for {symbol}: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    def check_signal_persistence(self, symbol: str, min_persistence: int = 2) -> Dict[str, Any]:
+        """
+        Check if a symbol has had high conviction signals in consecutive snapshots.
+        
+        Args:
+            symbol: Stock symbol to check
+            min_persistence: Minimum number of consecutive snapshots required (default: 2)
+        
+        Returns:
+            Dict with persistence_count and whether it meets threshold
+        """
+        conn = db.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 
+                        COUNT(*) as snapshot_count,
+                        MAX(signal_persistence_count) as max_persistence,
+                        MAX(as_of_timestamp) as latest_timestamp
+                    FROM daily_anomaly_snapshot
+                    WHERE symbol = %s
+                      AND event_date = %s
+                      AND is_high_conviction = TRUE
+                """, (symbol, self.current_date))
+                
+                row = cur.fetchone()
+                if row and row[0] > 0:
+                    return {
+                        'symbol': symbol,
+                        'snapshot_count': row[0],
+                        'persistence_count': row[1] or 1,
+                        'latest_timestamp': row[2],
+                        'meets_threshold': (row[1] or 1) >= min_persistence
+                    }
+                
+                return {
+                    'symbol': symbol,
+                    'snapshot_count': 0,
+                    'persistence_count': 0,
+                    'latest_timestamp': None,
+                    'meets_threshold': False
+                }
+        finally:
+            conn.close()
+    
+    def update_signal_persistence(self, symbols: List[str]) -> Dict[str, int]:
+        """
+        Update signal persistence counts for symbols with high conviction signals.
+        
+        For each symbol, check if there was a high conviction signal in the previous
+        snapshot (same day, earlier timestamp). If so, increment the persistence count.
+        
+        Args:
+            symbols: List of symbols that have high conviction signals in current snapshot
+        
+        Returns:
+            Dict mapping symbol to updated persistence count
+        """
+        if not symbols:
+            return {}
+        
+        conn = db.connect()
+        persistence_counts = {}
+        
+        try:
+            with conn.cursor() as cur:
+                for symbol in symbols:
+                    cur.execute("""
+                        WITH current_snapshot AS (
+                            SELECT as_of_timestamp
+                            FROM daily_anomaly_snapshot
+                            WHERE symbol = %s
+                              AND event_date = %s
+                              AND is_high_conviction = TRUE
+                            ORDER BY as_of_timestamp DESC
+                            LIMIT 1
+                        ),
+                        prior_snapshot AS (
+                            SELECT signal_persistence_count
+                            FROM daily_anomaly_snapshot a
+                            WHERE a.symbol = %s
+                              AND a.event_date = %s
+                              AND a.is_high_conviction = TRUE
+                              AND a.as_of_timestamp < (SELECT as_of_timestamp FROM current_snapshot)
+                            ORDER BY a.as_of_timestamp DESC
+                            LIMIT 1
+                        )
+                        SELECT COALESCE((SELECT signal_persistence_count FROM prior_snapshot), 0) + 1 AS new_count
+                    """, (symbol, self.current_date, symbol, self.current_date))
+                    
+                    row = cur.fetchone()
+                    new_count = row[0] if row else 1
+                    persistence_counts[symbol] = new_count
+                    
+                    cur.execute("""
+                        UPDATE daily_anomaly_snapshot
+                        SET signal_persistence_count = %s
+                        WHERE symbol = %s
+                          AND event_date = %s
+                          AND as_of_timestamp = (
+                              SELECT MAX(as_of_timestamp)
+                              FROM daily_anomaly_snapshot
+                              WHERE symbol = %s AND event_date = %s
+                          )
+                    """, (new_count, symbol, self.current_date, symbol, self.current_date))
+                
+                conn.commit()
+                logger.info(f"Updated persistence counts for {len(persistence_counts)} symbols")
+                
+        except Exception as e:
+            logger.error(f"Failed to update signal persistence: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+        
+        return persistence_counts
+    
+    def get_persistent_signals(self, min_persistence: int = 2) -> List[Dict]:
+        """
+        Get all high conviction signals that have persisted for at least min_persistence snapshots.
+        
+        Args:
+            min_persistence: Minimum number of consecutive snapshots (default: 2)
+        
+        Returns:
+            List of anomaly records that meet persistence threshold
+        """
+        conn = db.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 
+                        symbol,
+                        total_score,
+                        high_conviction_score,
+                        signal_persistence_count,
+                        total_magnitude,
+                        recommended_option,
+                        contract_candidates,
+                        best_gamma_contract,
+                        as_of_timestamp
+                    FROM daily_anomaly_snapshot
+                    WHERE event_date = %s
+                      AND is_high_conviction = TRUE
+                      AND signal_persistence_count >= %s
+                    ORDER BY signal_persistence_count DESC, high_conviction_score DESC
+                """, (self.current_date, min_persistence))
+                
+                rows = cur.fetchall()
+                columns = ['symbol', 'total_score', 'high_conviction_score', 'signal_persistence_count',
+                          'total_magnitude', 'recommended_option', 'contract_candidates', 
+                          'best_gamma_contract', 'as_of_timestamp']
+                
+                return [dict(zip(columns, row)) for row in rows]
         finally:
             conn.close()
 

@@ -1,6 +1,8 @@
 # Insider Trading Detection System
 
-Real-time options flow analysis to detect unusual institutional activity. Pulls full-market snapshots every 15 minutes, compares against 90-day baselines, and sends email alerts when greeks indicate high-conviction plays.
+Real-time options flow anomaly detection. Scans the full US options market every 15 minutes during trading hours, compares against 90-day statistical baselines, and emails high-conviction alerts with enrichment context (news, SEC filings, symbol novelty) for human review.
+
+**This is a research/watchlist tool, not an automated trading system.** The alerts surface unusual activity; the human reviewer makes the final call.
 
 ## Quick Start
 
@@ -8,162 +10,102 @@ Real-time options flow analysis to detect unusual institutional activity. Pulls 
 # Install dependencies
 pip install -r requirements.txt
 
-# Intraday monitoring (market hours)
+# Set environment variables (see Configuration below)
+cp env.template.txt .env  # then edit with your keys
+
+# Run database migrations (first time only)
+python -c "from migrations.migration_manager import MigrationManager; MigrationManager().migrate()"
+
+# Intraday monitoring (run during market hours, typically via cron/GitHub Actions)
 python intraday_schedule.py
 
-# Daily ETL (runs once after market close)
+# Daily ETL (run once morning after market close)
 python daily_schedule.py --recent 3 --retention 90
 ```
 
-## Architecture Overview
+## How It Works
 
-### Daily vs Intraday
+### Two-Tier Detection Architecture
 
-**Daily Process** (`daily_schedule.py` - runs 9 AM EST):
-- Loads historical OHLC from Polygon S3 flat files (stock + options)
-- Transfers greeks from yesterday's intraday snapshots to permanent storage
-- Updates contract metadata, applies retention policies
-- Flags bot-driven and earnings-related activity
+**Tier 1 — Event Scoring** (symbol-level, gates alerts):
 
-**Intraday Process** (`intraday_schedule.py` - every 15 min):
-- Fetches full market snapshot (11K stocks, 300K+ option contracts)
-- Runs anomaly detection against 90-day baseline
-- Sends email alerts for high-conviction signals
-- Preserves temp data for next morning's daily process
+| Factor | Threshold | What It Captures |
+|--------|-----------|------------------|
+| Volume Score | >= 2.0 | Unusual options volume vs 90-day baseline |
+| Z-Score | >= 3.0 | Statistical deviation from normal activity |
+| Vol:OI Ratio | >= 1.2 | Fresh positioning (new positions, not churn) |
+| Magnitude | >= $50,000 | Institutional-scale dollar volume |
 
-**Data Flow:**
+Alert fires when **3+ of 4** factors exceed thresholds, AND the event is not bot-driven (<5% intraday stock move) and not earnings-related (>4 days from earnings).
+
+**Tier 2 — Contract Selection** (picks recommended option):
+
+Among tradeable contracts ($0.05-$5.00, volume > 50, direction-aligned), the system selects by highest volume (most liquid). Greeks (gamma, vega, theta) are stored for informational tracking but do not gate alerts.
+
+**Enrichment** (context for human review):
+
+Each alert is enriched with:
+- **Symbol novelty**: How often this ticker triggers. First-time triggers on quiet stocks are more suspicious than daily triggers on volatile tickers.
+- **Polygon news**: Recent news articles around the ticker. No-news anomalies suggest possible information asymmetry.
+- **SEC EDGAR Form 4**: Recent corporate insider filings. Insider buying aligned with call-heavy anomalies increases conviction.
+
+### Data Flow
+
 ```
-Intraday:  Live API → temp_option (with greeks) → Anomaly Detection → Email
-Daily:     S3 OHLC → daily_option_snapshot + temp_option greeks → Baseline DB
+Intraday (every 15 min):
+  Polygon API  -->  temp_stock / temp_option  -->  Anomaly Detection  -->  Email Alert
+                                                         |
+                                                   daily_anomaly_snapshot
+
+Daily (morning after close):
+  S3 flat files  -->  daily_option_snapshot  -->  Greeks/OI backfill from temp
+  Polygon API    -->  daily_stock_snapshot       Earnings flags, bot flags
+                      option_contracts           Retention cleanup
 ```
 
-The intraday process captures real-time greeks that the daily process uses the next morning to enrich historical data for baseline calculations.
+The intraday process captures live snapshots with Greeks. The daily process loads historical OHLC from S3 flat files and backfills Greeks/OI from the previous day's temp data, building the 90-day baseline used by detection.
 
-## Detection Algorithm
+### Filtering
 
-### Greeks-Based High Conviction Score (Primary System)
-
-Scores 0-4 based on how many factors exceed 93rd percentile thresholds. Send email alert if score >= 3.
-
-| Greek | Threshold | What It Captures | Why It Matters |
-|-------|-----------|------------------|----------------|
-| **Theta** | >= 0.1624 | Time decay rate | High theta = near expiration → urgency/conviction. Insiders buy short-dated options when they expect imminent move. |
-| **Gamma** | >= 0.4683 | Delta acceleration | High gamma = near ATM strikes → precise timing. Not lottery tickets, actual conviction at current price. |
-| **Vega** | >= 0.1326 | IV sensitivity | High vega = longer-dated or volatile → significant expected move. Insiders paying up for vol. |
-| **OTM Score** | >= 1.4 | Out-of-money concentration | Clustering in OTM strikes = directional bet vs hedging. Calculated from short-term OTM call percentage. |
-
-**Test Criteria:**
-- Backtest showed 50% hit rate for +100% returns (14 trades, 7 winners)
-- Theta+Gamma+Vega+OTM ranked #1 out of 414 factor combinations tested
-- 93rd percentile optimal (92nd = too many alerts, 95th = missed trades)
-
-**Why These Greeks:**
-- **Theta**: Insiders don't waste money on time decay unless they know timeline
-- **Gamma**: ATM positioning shows price conviction, not speculation
-- **Vega**: Willingness to pay volatility premium indicates expected magnitude
-- **OTM**: Pure directionality (vs ATM hedging or income strategies)
-
-### Legacy Composite Score (Secondary)
-
-Still tracked for comparison:
-- Volume Anomaly (0-3): Z-score vs 90-day baseline
-- Volume:OI Ratio (0-2): Unusual trading vs existing positions
-- OTM Concentration (0-2): Strike clustering
-- Directional Bias (0-1): Call/put imbalance
-- Time Pressure (0-2): Near-term expiration focus
-
-Alert if composite >= 7.5 OR greeks >= 3 (both require $20K+ magnitude).
-
-## Filtering
-
-**Excluded from alerts:**
-- **Bot-driven**: Stock moved >= 5% intraday (news already priced in)
+Excluded from alerts:
+- **Bot-driven**: Stock already moved >= 5% intraday (news already priced in)
 - **Earnings-related**: Within 4 days of earnings (speculation, not insider knowledge)
-- **Low magnitude**: < $20K total option volume (not institutional scale)
-
-These filters reduce false positives by ~70% while preserving actionable signals.
+- **Low magnitude**: < $20K total option dollar volume
 
 ## Database Schema
 
-### Core Tables
-
 | Table | Purpose | Retention |
 |-------|---------|-----------|
-| `temp_option` | Intraday snapshots with greeks | 1 day (truncated after daily ETL) |
-| `temp_stock` | Intraday stock OHLC | 1 day |
-| `daily_option_snapshot` | Historical options OHLC + greeks | 90 days |
-| `daily_stock_snapshot` | Historical stock OHLC | 90 days |
-| `daily_anomaly_snapshot` | Detection results | 90 days |
-| `option_contracts` | Contract metadata | Until expiration |
-| `earnings_calendar` | Earnings dates | 90 days |
+| `temp_stock` | Intraday stock snapshots | Truncated after daily ETL |
+| `temp_option` | Intraday option snapshots (with Greeks/IV) | Truncated after daily ETL |
+| `daily_stock_snapshot` | Historical stock OHLCV | ~90 business days |
+| `daily_option_snapshot` | Historical option OHLCV + Greeks/OI | ~90 business days |
+| `daily_anomaly_snapshot` | Detection results + scores + recommendations | ~90 business days |
+| `option_contracts` | Contract metadata (strike, expiry, type) | Until expiration |
+| `earnings_calendar` | Earnings dates for proximity filtering | ~90 days |
 
-### Anomaly Table Columns
+### Key Columns in `daily_anomaly_snapshot`
 
-**Scoring:**
-- `high_conviction_score` (0-4): Count of greeks above threshold
-- `is_high_conviction` (bool): Score >= 3
-- `total_score` (0-10): Legacy composite score
+**Event scoring**: `high_conviction_score` (0-4), `is_high_conviction` (bool), `volume_score`, `z_score`, `volume_oi_ratio_score`, `total_magnitude`
 
-**Greeks Details:**
-- `greeks_theta_value`, `greeks_theta_percentile`: Actual theta & ranking
-- `greeks_gamma_value`, `greeks_gamma_percentile`: Actual gamma & ranking
-- `greeks_vega_value`, `greeks_vega_percentile`: Actual vega & ranking
-- `greeks_otm_value`, `greeks_otm_percentile`: OTM score & ranking
+**Contract recommendation**: `recommended_option`, `direction` (call_heavy/put_heavy/mixed), `selected_strategy`
 
-**Filtering:**
-- `is_bot_driven` (bool): Intraday move >= 5%
-- `is_earnings_related` (bool): Within 4 days of earnings
-- `is_actionable` (bool): NOT (bot_driven OR earnings_related)
+**Filters**: `is_bot_driven`, `is_earnings_related`, `is_actionable`, `intraday_price_move_pct`, `earnings_proximity_days`
 
-**Recommendation:**
-- `recommended_option` (varchar): Highest volume contract in direction
-- `direction` (varchar): call_heavy / put_heavy / mixed
+**Legacy**: `total_score` (0-10 composite), `otm_score`, `directional_score`, `time_score` — still computed, not used for alerting
 
 ## Email Alerts
 
-Sends email when:
-- Greeks score >= 3/4, OR
-- Legacy score >= 7.5
-- AND magnitude >= $20K
-- AND actionable (not bot/earnings)
+Sends when:
+- Event score >= 3/4
+- Magnitude >= $20K
+- Not bot-driven, not earnings-related
 
-Email includes:
-- Symbol & direction
-- Greeks score breakdown (which factors triggered)
+Each email includes:
+- Symbol, direction, event score breakdown
 - Recommended contract ticker
-- Entry price, volume, OI data
-- Historical baseline comparison
-
-## Configuration
-
-Required environment variables:
-
-```bash
-# Database
-SUPABASE_DB_URL=postgresql://user:pass@host:port/db
-
-# Polygon API
-POLYGON_API_KEY=your_key_here
-POLYGON_S3_ACCESS_KEY=s3_key
-POLYGON_S3_SECRET_KEY=s3_secret
-
-# Email (optional, for alerts)
-SMTP_SERVER=smtp.gmail.com
-SMTP_PORT=465
-SENDER_EMAIL=alerts@yourdomain.com
-EMAIL_PASSWORD=app_password
-RECIPIENT_EMAIL=you@yourdomain.com
-ANOMALY_EMAIL_ENABLED=true
-```
-
-## GitHub Actions
-
-Scheduled runs (edit `.github/workflows/`):
-
-- `intraday.yml`: `*/15 14-21 * * 1-5` (every 15 min, 9:45 AM - 4:45 PM EST, Mon-Fri)
-- `daily.yml`: `0 13 * * 1-6` (8:00 AM EST, Mon-Sat)
-
-Adjust for your timezone. Actions include timeout protection and retry logic.
+- Volume and magnitude details
+- **Signal context** (enrichment): novelty score, recent news, SEC insider filings, conviction modifier
 
 ## Streamlit Dashboard
 
@@ -172,105 +114,113 @@ cd app
 streamlit run streamlit_app.py
 ```
 
-Features:
-- High conviction alerts (filterable by date, score)
-- Historical performance tracking
-- Symbol drilldown with option chain heatmaps
-- Greeks distribution analysis
+Live at: https://bk-insidertrades.streamlit.app
 
-## Testing & Validation
+**High Conviction tab**: Event-scored alerts with factor breakdown and contract recommendations.
+**Legacy tab**: Historical composite-score view for comparison.
+**Performance Overview**: TP100 hit rates and forward return analysis.
 
-### Unit Tests
+## Configuration
+
+Required environment variables (see `env.template.txt`):
+
 ```bash
-python verifications/test_greeks_sanitization.py  # Greek bounds validation
-python verifications/test_polygon_api_quality.py   # API health check
+# Database (required)
+SUPABASE_DB_URL=postgresql://user:pass@host:port/db
+
+# Polygon API (required)
+POLYGON_API_KEY=your_key
+POLYGON_S3_ACCESS_KEY=s3_key
+POLYGON_S3_SECRET_KEY=s3_secret
+
+# Email alerts (optional)
+SENDER_EMAIL=alerts@domain.com
+EMAIL_PASSWORD=app_password
+RECIPIENT_EMAIL=you@domain.com
+ANOMALY_EMAIL_ENABLED=true
+
+# Tuning (optional, defaults shown)
+CONTRACT_SELECTION_STRATEGY=max_volume
+INTRADAY_OPTIONS_LIMIT=250
+INTRADAY_OPTIONS_BATCH_CALLS=100
+INTRADAY_OPTIONS_WORKERS=20
 ```
 
-### Performance Analysis
-```bash
-python verifications/analyze_trigger_performance.py --min-score 7.5
-python verifications/find_missed_opportunities.py
-```
+## Scheduled Runs (GitHub Actions)
 
-Generates reports in `verifications/` showing:
-- Forward returns (T+1, T+3, T+5, T+10)
-- Win rates by score buckets
-- Correlation analysis (which factors predict returns)
-- False negatives (missed moves)
-
-### Backtesting Criteria
-
-Original validation (Nov-Dec 2025):
-- 410 triggers at score >= 7.5 → mean T+5 return: -2.24% (LOSING)
-- 23 triggers at score >= 9.0 → mean T+5 return: +5.04% (WINNING)
-- **Conclusion**: Threshold too low. Greeks system (score >= 3) filters better.
-
-Greeks validation (Jan 2026):
-- 14 triggers at greeks >= 3 → 7 hit +100% (50% success rate)
-- Theta+Gamma+Vega+OTM best 4-factor combo (tested 414 combinations)
+- **Intraday**: `*/15 14-21 * * 1-5` (every 15 min, ~9:45 AM - 4:45 PM EST, Mon-Fri)
+- **Daily**: `0 13 * * 1-6` (8:00 AM EST, Mon-Sat)
 
 ## Migrations
 
-Database schema changes are in `migrations/`. Run on fresh install:
+Schema changes are versioned in `migrations/`. Run all pending:
 
 ```bash
 python -c "from migrations.migration_manager import MigrationManager; MigrationManager().migrate()"
 ```
 
-Key migrations:
-- `20250825_000001_create_complete_database.py`: Initial schema
-- `20260112_000001_create_earnings_calendar_table.py`: Earnings filtering
-- `20260113_000001_add_high_conviction_scoring.py`: Greeks system
-- `20260131_000001_add_greek_component_columns.py`: Individual tracking
-- `20260131_000002_add_greek_values_and_percentiles.py`: Percentile ranks
+## Analysis & Validation
 
-## Production Readiness Checklist
+```bash
+# Two-tier event scoring validation (Wilson CIs, walk-forward)
+python analysis.py                    # Full (slow for contract comparison)
+python analysis.py --skip-contracts   # Fast (event scoring only)
 
-- [x] API rate limiting & retry logic (with exponential backoff)
-- [x] Bulk insert optimization (COPY command, not row-by-row)
-- [x] Data sanitization (greeks bounds checking)
-- [x] Graceful degradation (missing greeks → NULL, not failure)
-- [x] Monitoring & alerting (email on detection, logs on errors)
-- [x] Idempotent operations (ON CONFLICT DO UPDATE)
-- [x] Timezone handling (EST for market hours)
-- [x] Concurrency controls (ThreadPoolExecutor with limits)
-- [x] Security (no secrets in code, env vars only)
+# Factor analysis (which factors predict outcomes)
+python analysis/comprehensive_factor_analysis.py --days 90 --limit 3000
+
+# Enrichment feature testing (novelty, direction, stock price, DTE)
+python analysis/enriched_signal_analysis.py
+
+# Stock move prediction (do anomalies predict underlying stock moves?)
+python analysis/stock_move_analysis.py
+
+# Extreme return analysis (TP500+/TP1000+ targets)
+python analysis/extreme_return_analysis.py
+```
+
+### What the Analysis Shows (March 2026)
+
+Based on 35,240 events over 29 trading days:
+- **Baseline TP100 rate**: 24.2% (option doubles by expiry)
+- **Best factor lift**: 1.15x (first-time triggers), 1.24x (put-heavy direction)
+- **Scoring factors**: Do not discriminate winners from losers. TP500+/TP1000+ winners sit at P50 on all factors.
+- **Stock move prediction**: OTM-heavy + moderate z-score predicts volatility events at 1.52x lift, but direction accuracy is 45.7% (below random).
+- **Enrichment value**: Context for human judgment (novelty, news, EDGAR), not mechanical filtering.
+
+The system detects unusual activity. Whether that activity is profitable depends on the human reviewer's judgment, timing, and risk management.
+
+## Project Structure
+
+```
+insider_trades/
+  intraday_schedule.py        # Entry point: 15-min snapshot + detection + alerts
+  daily_schedule.py           # Entry point: morning ETL + enrichment + retention
+  analysis.py                 # Two-tier validation framework
+  database/
+    core/                     # DB connection, bulk ops, stock data manager
+    analysis/                 # InsiderAnomalyDetector (core scoring logic)
+    maintenance/              # Data retention manager
+  scrapers/                   # Polygon API + S3 flat file loaders
+  notifications/              # Email notifier with enrichment integration
+  enrichment/                 # Signal enrichment (news, EDGAR, novelty)
+  app/                        # Streamlit dashboard
+  config/                     # Contract selection strategy config
+  migrations/                 # Versioned schema migrations
+  analysis/                   # Research & validation scripts
+  docs/                       # Reference documentation
+```
 
 ## Troubleshooting
 
-**Greeks not populating:**
-- Check `temp_option` has data: `SELECT COUNT(*) FROM temp_option WHERE greeks_gamma IS NOT NULL;`
-- Verify daily process runs after intraday: Check timestamps
-- Ensure temp tables aren't truncated before daily runs
+**No email alerts**: Check `ANOMALY_EMAIL_ENABLED=true`, verify SMTP credentials, confirm `is_high_conviction=TRUE` rows exist in `daily_anomaly_snapshot` (may be filtered by bot/earnings flags).
 
-**No email alerts:**
-- Check `ANOMALY_EMAIL_ENABLED=true` in env
-- Verify SMTP credentials are correct
-- Look for `is_high_conviction=TRUE` in database (may be filtered by bot/earnings flags)
+**Greeks not populating**: Ensure daily process runs AFTER intraday (it backfills from temp tables). Check `temp_option` has data: `SELECT COUNT(*) FROM temp_option WHERE greeks_gamma IS NOT NULL`.
 
-**API errors (502, timeout):**
-- Polygon API occasionally degrades. Retry logic handles this.
-- Check API status: https://polygon.io/status
-- Reduce `--options-workers` if hitting rate limits
+**API errors**: Polygon API has occasional degradation. Built-in retry logic handles transient failures. Check https://polygon.io/status. Reduce `--options-workers` if hitting rate limits.
 
-**Performance issues:**
-- Increase `--options-batch-calls` and `--options-workers` for speed
-- Use `--options-limit` for testing (limits contract count)
-- Check database indexes (auto-created by migrations)
-
-## Development
-
-```bash
-# Local development
-python intraday_schedule.py --retention 1 --options-limit 100
-
-# Check linter
-python -m pylint database/ scrapers/ notifications/
-
-# Run single anomaly detection
-python -c "from database.analysis.insider_anomaly_detection import InsiderAnomalyDetector; print(InsiderAnomalyDetector().run_detection())"
-```
+**Migration timeouts**: Usually caused by locks from long-running queries, not slow DDL. Kill stuck queries in Supabase dashboard first.
 
 ## License
 
-Research/educational purposes only. Not financial advice. Comply with all securities laws and regulations. Options trading carries significant risk.
+Research/educational purposes only. Not financial advice. Options trading carries significant risk. Comply with all applicable securities laws.
