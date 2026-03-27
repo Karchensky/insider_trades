@@ -167,36 +167,36 @@ class SignalEnrichment:
         # Novelty
         novelty = enrichment.get('novelty', {})
         if novelty.get('is_first_trigger'):
-            parts.append('🔴 <b>FIRST-TIME TRIGGER</b> — never seen anomaly on this ticker')
+            parts.append('[!!!] <b>FIRST-TIME TRIGGER</b> -- never seen anomaly on this ticker')
         elif novelty.get('trigger_count_30d', 0) <= 2:
-            parts.append(f'🟡 <b>RARE TRIGGER</b> — {novelty.get("trigger_count_30d", "?")}x in 30 days')
+            parts.append(f'[!!] <b>RARE TRIGGER</b> -- {novelty.get("trigger_count_30d", "?")}x in 30 days')
         elif novelty.get('trigger_count_30d', 0) >= 10:
-            parts.append(f'⚪ Frequent trigger ({novelty.get("trigger_count_30d")}x in 30 days)')
+            parts.append(f'[--] Frequent trigger ({novelty.get("trigger_count_30d")}x in 30 days)')
 
         # News
         news = enrichment.get('news', {})
         if news.get('has_news') is False:
-            parts.append('🔴 <b>NO RECENT NEWS</b> — possible information asymmetry')
+            parts.append('[!!!] <b>NO RECENT NEWS</b> -- possible information asymmetry')
         elif news.get('has_catalyst_news'):
             catalysts = ', '.join(news.get('catalyst_keywords', [])[:3])
-            parts.append(f'⚪ Known catalyst news: {catalysts}')
+            parts.append(f'[--] Known catalyst news: {catalysts}')
         elif news.get('has_news'):
-            parts.append(f'🟡 {news.get("news_count", 0)} recent articles (no catalyst keywords)')
+            parts.append(f'[!] {news.get("news_count", 0)} recent articles (no catalyst keywords)')
 
         # EDGAR
         edgar = enrichment.get('edgar', {})
         if edgar.get('has_filings'):
-            parts.append(f'📋 {edgar.get("filing_count", 0)} Form 4 filings in last 14 days')
+            parts.append(f'[EDGAR] {edgar.get("filing_count", 0)} Form 4 filings in last 14 days')
             if edgar.get('insider_alignment') == 'aligned':
-                parts.append('🔴 <b>INSIDER ALIGNMENT</b> — corporate insiders trading same direction')
+                parts.append('[!!!] <b>INSIDER ALIGNMENT</b> -- corporate insiders trading same direction')
         elif edgar.get('has_filings') is False:
-            parts.append('📋 No recent insider filings')
+            parts.append('[EDGAR] No recent insider filings')
 
         # Net conviction
         mods = enrichment.get('conviction_modifiers', {})
         net = mods.get('net_modifier', 0)
         if net >= 2:
-            parts.append(f'<br><b>⚡ ENRICHMENT CONVICTION: HIGH (+{net})</b>')
+            parts.append(f'<br><b>>>> ENRICHMENT CONVICTION: HIGH (+{net})</b>')
         elif net >= 1:
             parts.append(f'<br><b>Enrichment conviction: elevated (+{net})</b>')
         elif net <= -1:

@@ -229,38 +229,66 @@ def run_once(include_otc: bool,
                         # Get signals that meet persistence threshold (2+ consecutive snapshots)
                         persistent_signals = detector.get_persistent_signals(min_persistence=2)
                         
+                        # Run enrichment for high-conviction symbols and store in DB
+                        enrichment_data = {}
+                        try:
+                            from enrichment.signal_enrichment import SignalEnrichment
+                            enricher = SignalEnrichment(skip_edgar=False, skip_news=False)
+                            from datetime import date as _date
+                            today = _date.today()
+                            for sym in high_conviction_symbols:
+                                sym_data = anomalies.get(sym, {})
+                                event_date = sym_data.get('event_date', today)
+                                if isinstance(event_date, str):
+                                    try:
+                                        from datetime import datetime as _dt
+                                        event_date = _dt.strptime(event_date, '%Y-%m-%d').date()
+                                    except ValueError:
+                                        event_date = today
+                                details = sym_data.get('details', {})
+                                call_vol = details.get('call_volume', 0)
+                                put_vol = details.get('put_volume', 0)
+                                direction = 'call_heavy' if call_vol > put_vol else 'put_heavy'
+                                enrichment = enricher.enrich_event(sym, event_date, direction)
+                                enrichment_data[sym] = enrichment
+                                detector.store_enrichment_data(sym, event_date, enrichment)
+                            logger.info(f"[enrichment] Enriched {len(enrichment_data)} high-conviction symbols")
+                        except ImportError:
+                            logger.info("[enrichment] Enrichment module not available - skipping")
+                        except Exception as enr_err:
+                            logger.warning(f"[enrichment] Enrichment failed (continuing without): {enr_err}")
+
                         if persistent_signals:
                             logger.info(f"[persistence] {len(persistent_signals)} symbols meet persistence threshold")
-                            
+
                             # Filter anomalies to only include persistent ones for alerting
                             persistent_anomalies = {
                                 sig['symbol']: anomalies.get(sig['symbol'], {})
                                 for sig in persistent_signals
                                 if sig['symbol'] in anomalies
                             }
-                            
+
                             # Send email notification only for persistent high-conviction anomalies
                             logger.info("[notifications] Sending email alert for persistent high-conviction anomalies...")
                             try:
-                                if send_anomaly_notification(persistent_anomalies):
-                                    logger.info(f"[notifications] ✓ Email alert sent for {len(persistent_anomalies)} persistent anomalies")
+                                if send_anomaly_notification(persistent_anomalies, enrichment_data=enrichment_data):
+                                    logger.info(f"[notifications] Email alert sent for {len(persistent_anomalies)} persistent anomalies")
                                 else:
-                                    logger.info("[notifications] ✓ No email sent - no persistent anomalies met volume threshold")
+                                    logger.info("[notifications] No email sent - no persistent anomalies met volume threshold")
                             except Exception as ne:
-                                logger.error(f"[notifications] ✗ Email notification error: {ne}")
+                                logger.error(f"[notifications] Email notification error: {ne}")
                         else:
                             logger.info("[persistence] No signals meet persistence threshold yet - waiting for confirmation")
-                            
+
                             # Still send alerts for first-time high-conviction signals (legacy behavior)
-                            # but mark them as "UNCONFIRMED" in the notification
                             logger.info("[notifications] Checking for first-time high-conviction signals...")
                             try:
-                                if send_anomaly_notification(anomalies):
-                                    logger.info(f"[notifications] ✓ Email alert sent for first-time anomalies (unconfirmed)")
+                                if send_anomaly_notification(anomalies, enrichment_data=enrichment_data):
+                                    logger.info(f"[notifications] Email alert sent for first-time anomalies (unconfirmed)")
                                 else:
-                                    logger.info("[notifications] ✓ No email sent - no anomalies met volume threshold")
+                                    logger.info("[notifications] No email sent - no anomalies met volume threshold")
                             except Exception as ne:
-                                logger.error(f"[notifications] ✗ Email notification error: {ne}")
+                                logger.error(f"[notifications] Email notification error: {ne}")
                     else:
                         logger.info("[anomaly_detection] ✓ No high-conviction anomalies - market activity within normal ranges")
                 else:

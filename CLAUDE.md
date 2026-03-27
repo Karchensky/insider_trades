@@ -17,14 +17,14 @@ Detect **anomalous options flow** that may indicate insider trading. Produce **l
 | `intraday_schedule.py` | Every ~15 min: Polygon snapshots -> `temp_*` -> `InsiderAnomalyDetector` -> `daily_anomaly_snapshot` -> enrichment -> optional email |
 | `daily_schedule.py` | Morning: daily OHLC, flat-file options, contract sync, Greeks/OI backfill, actionability flags, retention |
 
-**Data flow:** live API -> `temp_stock` / `temp_option` -> scoring -> `daily_anomaly_snapshot`; S3 flat files -> `daily_option_snapshot` + Greeks/OI enrichment from temp.
+**Data flow:** live API -> `temp_stock` / `temp_option` -> scoring -> `daily_anomaly_snapshot` -> enrichment (novelty + news + EDGAR) for high-conviction alerts -> stored in DB -> optional email; S3 flat files -> `daily_option_snapshot` + Greeks/OI enrichment from temp.
 
 ## Core tables
 
 - **`temp_stock` / `temp_option`** — intraday only; truncated after daily job.
 - **`daily_stock_snapshot` / `daily_option_snapshot`** — historical OHLC; options get Greeks/IV/OI from temp + daily jobs.
 - **`option_contracts`** — contract metadata.
-- **`daily_anomaly_snapshot`** — one row per `(event_date, symbol, as_of_timestamp)` with scores, magnitudes, **recommended_option**, Greek values/flags, filters.
+- **`daily_anomaly_snapshot`** — one row per `(event_date, symbol, as_of_timestamp)` with scores, magnitudes, **recommended_option**, Greek values/flags, filters, **enrichment columns** (novelty, news, EDGAR, conviction modifier).
 - **`earnings_calendar`** — earnings dates for proximity filtering.
 
 Retention: **~90 business days** for snapshots (see `DataRetentionManager`).

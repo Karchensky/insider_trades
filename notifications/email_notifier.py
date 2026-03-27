@@ -61,11 +61,14 @@ class EmailNotifier:
         logger.info(f"Parsed {len(cleaned_emails)} recipient email(s)")
         return cleaned_emails
         
-    def send_anomaly_alert(self, anomalies: Dict[str, Dict]) -> bool:
+    def send_anomaly_alert(self, anomalies: Dict[str, Dict],
+                           enrichment_data: Optional[Dict[str, Dict]] = None) -> bool:
         """Send email alert for detected anomalies.
 
         Sends email when event-level score >= 3/4 (volume_score, z_score, vol_oi_score, magnitude).
         Bot-driven and earnings-related events are excluded.
+
+        If enrichment_data is provided, uses it directly. Otherwise computes enrichment on-the-fly.
         """
         if not self.enabled:
             logger.info("Email notifications disabled")
@@ -109,8 +112,10 @@ class EmailNotifier:
         logger.info(f"Found {len(high_conviction_alerts)} HIGH CONVICTION alerts - sending email!")
 
         # Enrich alerts with external context (news, EDGAR, novelty)
-        enrichment_data = {}
-        if ENRICHMENT_AVAILABLE:
+        # If enrichment_data was pre-computed by the pipeline, use it directly
+        if enrichment_data is None:
+            enrichment_data = {}
+        if not enrichment_data and ENRICHMENT_AVAILABLE:
             try:
                 enricher = SignalEnrichment(skip_edgar=False, skip_news=False)
                 today = date.today()
@@ -346,10 +351,11 @@ class EmailNotifier:
             return False
 
 
-def send_anomaly_notification(anomalies: Dict[str, Dict]) -> bool:
+def send_anomaly_notification(anomalies: Dict[str, Dict],
+                              enrichment_data: Optional[Dict[str, Dict]] = None) -> bool:
     """Convenience function to send anomaly notifications."""
     notifier = EmailNotifier()
-    return notifier.send_anomaly_alert(anomalies)
+    return notifier.send_anomaly_alert(anomalies, enrichment_data=enrichment_data)
 
 
 if __name__ == '__main__':

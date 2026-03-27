@@ -1597,6 +1597,62 @@ class InsiderAnomalyDetector:
         finally:
             conn.close()
     
+    def store_enrichment_data(self, symbol: str, event_date, enrichment: Dict[str, Any]) -> bool:
+        """
+        Store enrichment results (novelty, news, EDGAR, conviction modifier)
+        into the daily_anomaly_snapshot row for this symbol/event_date.
+
+        Called after detection, only for high-conviction alerts.
+        """
+        import json
+        conn = self.db.connect()
+        try:
+            with conn.cursor() as cur:
+                news = enrichment.get('news', {})
+                edgar = enrichment.get('edgar', {})
+                novelty = enrichment.get('novelty', {})
+                modifiers = enrichment.get('conviction_modifiers', {})
+
+                cur.execute("""
+                    UPDATE daily_anomaly_snapshot SET
+                        enrichment_novelty_is_first = %s,
+                        enrichment_novelty_count_30d = %s,
+                        enrichment_novelty_score = %s,
+                        enrichment_news_has_news = %s,
+                        enrichment_news_count = %s,
+                        enrichment_news_has_catalyst = %s,
+                        enrichment_edgar_has_filings = %s,
+                        enrichment_edgar_filing_count = %s,
+                        enrichment_edgar_alignment = %s,
+                        enrichment_conviction_modifier = %s,
+                        enrichment_enriched_at = NOW(),
+                        enrichment_raw_json = %s
+                    WHERE event_date = %s AND symbol = %s
+                """, (
+                    novelty.get('is_first_trigger'),
+                    novelty.get('trigger_count_30d'),
+                    novelty.get('novelty_score'),
+                    news.get('has_news'),
+                    news.get('news_count'),
+                    news.get('has_catalyst_news'),
+                    edgar.get('has_filings'),
+                    edgar.get('filing_count'),
+                    edgar.get('insider_alignment'),
+                    modifiers.get('net_modifier'),
+                    json.dumps(enrichment, default=str),
+                    event_date,
+                    symbol,
+                ))
+                conn.commit()
+                logger.info(f"Stored enrichment for {symbol}: modifier={modifiers.get('net_modifier', 'N/A')}")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to store enrichment for {symbol}: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
     def check_signal_persistence(self, symbol: str, min_persistence: int = 2) -> Dict[str, Any]:
         """
         Check if a symbol has had high conviction signals in consecutive snapshots.

@@ -26,8 +26,8 @@ try:
         create_anomaly_summary_table, create_anomaly_summary_by_date, create_symbol_analysis,
         get_available_symbols, create_options_heatmaps, create_contracts_table, create_basic_symbol_analysis, get_symbol_anomaly_data,
         create_performance_matrix, get_ordered_anomaly_symbols,
-        create_greeks_display, create_performance_analysis_page,
-        get_high_conviction_anomalies, create_greeks_symbol_analysis
+        create_performance_analysis_page,
+        get_high_conviction_anomalies
     )
     DATABASE_AVAILABLE = True
 except Exception as e:
@@ -171,16 +171,28 @@ def render_greeks_based_page(anomalies_df: pd.DataFrame, available_symbols: list
             # Display alerts table
             st.subheader(f"Active High Conviction Alerts ({len(hc_df)})")
             
-            display_df = hc_df[['event_date', 'symbol', 'direction', 'high_conviction_score', 
-                               'recommended_option', 'otm_score', 'total_magnitude']].copy()
+            display_df = hc_df[['event_date', 'symbol', 'direction', 'high_conviction_score',
+                               'enrichment_conviction_modifier', 'enrichment_novelty_is_first',
+                               'enrichment_novelty_count_30d',
+                               'recommended_option', 'total_magnitude']].copy()
             display_df.columns = ['Date', 'Symbol', 'Direction', 'Event Score',
-                                 'Recommended Option', 'OTM Score', 'Magnitude ($)']
+                                 'Conviction', 'Is First', 'Triggers 30d',
+                                 'Recommended Option', 'Magnitude ($)']
             display_df['Magnitude ($)'] = display_df['Magnitude ($)'].apply(lambda x: f"${x:,.0f}")
             display_df['Direction'] = display_df['Direction'].apply(
                 lambda x: "BULLISH" if x == 'call_heavy' else "BEARISH" if x == 'put_heavy' else x
             )
-            display_df['OTM Score'] = display_df['OTM Score'].apply(lambda x: f"{x:.2f}")
             display_df['Event Score'] = display_df['Event Score'].apply(lambda x: f"{x}/4")
+            # Format conviction modifier with +/- prefix
+            display_df['Conviction'] = display_df['Conviction'].apply(
+                lambda x: f"+{int(x)}" if x and int(x) > 0 else str(int(x)) if x else "N/A"
+            )
+            # Format novelty column
+            display_df['Novelty'] = display_df.apply(
+                lambda row: "FIRST" if row['Is First'] else f"{int(row['Triggers 30d'])}x" if row['Triggers 30d'] else "N/A",
+                axis=1
+            )
+            display_df = display_df.drop(columns=['Is First', 'Triggers 30d'])
             
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             

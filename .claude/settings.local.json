@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''analysis.py'', doraise=True\\); print\\(''analysis.py OK''\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''notifications/email_notifier.py'', doraise=True\\); print\\(''email_notifier.py OK''\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''app/streamlit_app.py'', doraise=True\\); print\\(''streamlit_app.py OK''\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''database/analysis/insider_anomaly_detection.py'', doraise=True\\); print\\(''insider_anomaly_detection.py OK''\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''database/analysis/insider_anomaly_detection_v2.py'', doraise=True\\); print\\(''v2 OK''\\)\")",
+      "Bash(python:*)",
+      "Bash(tasklist)",
+      "Bash(grep -r \"from scrapers\\\\|from notifications\\\\|from database\\\\|import.*schedule\" D:/Scripts/insider_trades/insider_trades/*.py)",
+      "Bash(rm -f database/analysis/insider_anomaly_detection_v2.py)",
+      "Bash(rm -f docs/CLEAN_SLATE_PROPOSAL.md)",
+      "Bash(rm -f docs/STATISTICAL_JUSTIFICATION.md)",
+      "Bash(rm -f docs/SYSTEM_REDESIGN_SUMMARY.md)",
+      "Bash(rm -f analysis/validate_optimized_scoring.py)",
+      "Bash(grep -r \"TODO\\\\|FIXME\\\\|HACK\" \"D:\\\\Scripts\\\\insider_trades\\\\insider_trades\" --include=\"*.py\" ! -path \"*/.venv/*\")",
+      "Bash(grep -r \"score >= 7\\\\|score >= 7\\\\.5\" D:Scriptsinsider_tradesinsider_trades --include=*.py ! -path */.venv/*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Read(//tmp/**)",
+      "Bash(python3:*)",
+      "Bash(python -c \":*)"
+    ]
+  }
+}
