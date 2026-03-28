@@ -9,8 +9,42 @@ __pycache__/
 # Supabase
 *supabase/
 
-# IDE / AI
+# IDE / AI assistants (local tooling — not application source)
 .cursor/
+.claude/
+.cursorignore
+.cursorindexingignore
+.cursorrules.local
+*.cursor.local
+settings.local.json
+.vscode/*.local.json
+
+# Agent / transcript dumps if copied into the repo
+agent-transcripts/
+*.agent.jsonl
+*-agent-transcript*.jsonl
+
+# Local scratch notes and personal docs (not for version control)
+scratch/
+*.local.md
+*.private.md
+.personal/
+
+# Secrets and credentials — never commit
+.env
+.env.*
+!.env.example
+secrets/
+.secrets/
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*-credentials.json
+service-account*.json
+.aws/credentials
+.netrc
 
 # Generated analysis output
 *.png
@@ -137,8 +171,7 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
-.env
+# Environments (see also Secrets section for .env / .env.*)
 .venv
 env/
 venv/
@@ -182,10 +215,3 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-
-# Cursor  
-#  Cursor is an AI-powered code editor.`.cursorignore` specifies files/directories to 
-#  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data
-#  refer to https://docs.cursor.com/context/ignore-files
-.cursorignore
-.cursorindexingignore
