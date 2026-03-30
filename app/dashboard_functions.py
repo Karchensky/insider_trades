@@ -2343,6 +2343,8 @@ def get_high_conviction_anomalies() -> pd.DataFrame:
             FROM daily_anomaly_snapshot
             WHERE is_high_conviction = TRUE
               AND total_magnitude >= 20000
+              AND COALESCE(is_bot_driven, false) = false
+              AND COALESCE(is_earnings_related, false) = false
             ORDER BY event_date DESC, high_conviction_score DESC
         """)
         
