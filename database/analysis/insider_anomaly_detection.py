@@ -381,6 +381,50 @@ class InsiderAnomalyDetector:
         finally:
             conn.close()
 
+    BOT_DRIVEN_THRESHOLD_PCT = 5.0  # Stock moved >= 5% intraday → likely bot-driven
+    EARNINGS_PROXIMITY_DAYS = 4     # Triggers within 4 days of earnings are excluded
+
+    def _get_earnings_proximity(self, symbols: List[str]) -> Dict[str, int]:
+        """
+        Get days until nearest earnings for each symbol.
+
+        Returns dict mapping symbol -> days to nearest earnings (past or future).
+        Symbols with no nearby earnings are omitted.
+        """
+        if not symbols:
+            return {}
+
+        conn = db.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT ON (symbol)
+                        symbol,
+                        ABS(earnings_date - %s) AS proximity_days
+                    FROM earnings_calendar
+                    WHERE symbol = ANY(%s)
+                      AND earnings_date BETWEEN %s - INTERVAL '30 days'
+                                             AND %s + INTERVAL '30 days'
+                    ORDER BY symbol, ABS(earnings_date - %s)
+                """, (self.current_date, symbols,
+                      self.current_date, self.current_date,
+                      self.current_date))
+
+                results = {}
+                columns = [desc[0] for desc in cur.description]
+                for row in cur.fetchall():
+                    data = self._row_to_dict(row, columns)
+                    sym = data.get('symbol')
+                    prox = data.get('proximity_days')
+                    if sym and prox is not None:
+                        results[sym] = int(prox)
+                return results
+        except Exception as e:
+            logger.warning(f"Failed to get earnings proximity: {e}")
+            return {}
+        finally:
+            conn.close()
+
     # =========================================================================
     # TWO-TIER SCORING ARCHITECTURE
     # =========================================================================
@@ -700,7 +744,10 @@ class InsiderAnomalyDetector:
         
         # Get intraday stock price movement for bot-driven detection
         intraday_moves = self._get_intraday_price_moves(symbols_list)
-        
+
+        # Get earnings proximity for earnings-related filtering
+        earnings_proximity = self._get_earnings_proximity(symbols_list)
+
         for symbol, contracts in symbol_data.items():
             # Calculate symbol-level metrics
             call_volume = int(sum(c['session_volume'] for c in contracts if c['contract_type'] == 'call'))
@@ -829,6 +876,12 @@ class InsiderAnomalyDetector:
             # Get intraday price move for this symbol (for bot-driven detection)
             intraday_price_move_pct = intraday_moves.get(symbol, 0.0)
 
+            # Exclusion filters: bot-driven and earnings-related
+            is_bot_driven = abs(intraday_price_move_pct) >= self.BOT_DRIVEN_THRESHOLD_PCT
+            earnings_prox = earnings_proximity.get(symbol)
+            is_earnings_related = (earnings_prox is not None
+                                   and 0 <= earnings_prox <= self.EARNINGS_PROXIMITY_DAYS)
+
             # =========================================================
             # TIER 1: EVENT-LEVEL SCORING (volume-based, symbol-level)
             # This gates whether the event triggers an alert.
@@ -847,7 +900,10 @@ class InsiderAnomalyDetector:
                 'composite_score': rounded_composite_score,
                 'total_volume': total_volume,  # Add total_volume at top level for email filtering
                 'total_magnitude': total_magnitude,  # Add total_magnitude for filtering
-                'intraday_price_move_pct': intraday_price_move_pct,  # For bot-driven detection
+                'intraday_price_move_pct': intraday_price_move_pct,
+                'is_bot_driven': is_bot_driven,
+                'is_earnings_related': is_earnings_related,
+                'earnings_proximity_days': earnings_prox,
                 # EVENT SCORE drives is_high_conviction (not Greeks)
                 'high_conviction_score': event_score,  # Event-level score (0-4)
                 'is_high_conviction': is_high_conviction_event,  # Event score >= 3
@@ -905,18 +961,29 @@ class InsiderAnomalyDetector:
             all_anomaly_data.append(anomaly_data)
 
             # Flag for notifications: event-level scoring gates alerts
-            # Event score >= 3 AND magnitude >= $20K (magnitude is also in event score, but enforce floor)
+            # Event score >= 3 AND magnitude >= $20K AND not bot-driven AND not earnings-related
             meets_event_threshold = is_high_conviction_event  # Event score >= 3
             meets_magnitude_threshold = total_magnitude >= 20000
 
             if meets_event_threshold and meets_magnitude_threshold:
-                high_conviction_symbols[symbol] = anomaly_data
-                logger.debug(
-                    f"[ALERT CANDIDATE] {symbol}: Event score {event_score}/4 "
-                    f"(vol={event_volume_met}, z={event_z_score_met}, "
-                    f"voi={event_vol_oi_met}, mag={event_magnitude_met}) "
-                    f"| Contract: {recommended_option} (strategy={selection_strategy})"
-                )
+                if is_bot_driven:
+                    logger.info(
+                        f"[EXCLUDED] {symbol}: bot-driven (intraday move "
+                        f"{intraday_price_move_pct:+.1f}% >= {self.BOT_DRIVEN_THRESHOLD_PCT}%)"
+                    )
+                elif is_earnings_related:
+                    logger.info(
+                        f"[EXCLUDED] {symbol}: earnings-related "
+                        f"({earnings_prox}d from earnings, threshold={self.EARNINGS_PROXIMITY_DAYS}d)"
+                    )
+                else:
+                    high_conviction_symbols[symbol] = anomaly_data
+                    logger.debug(
+                        f"[ALERT CANDIDATE] {symbol}: Event score {event_score}/4 "
+                        f"(vol={event_volume_met}, z={event_z_score_met}, "
+                        f"voi={event_vol_oi_met}, mag={event_magnitude_met}) "
+                        f"| Contract: {recommended_option} (strategy={selection_strategy})"
+                    )
         
         # Enrich anomaly data with additional features before storing
         if all_anomaly_data:
@@ -1456,7 +1523,8 @@ class InsiderAnomalyDetector:
                         direction = 'mixed'
                     
                     # Create pattern description
-                    pattern_description = f"{call_multiplier:.1f}x call volume, {call_volume/(total_volume)*100:.0f}% calls"
+                    call_pct = (call_volume / total_volume * 100) if total_volume > 0 else 0
+                    pattern_description = f"{call_multiplier:.1f}x call volume, {call_pct:.0f}% calls"
                     if details.get('otm_call_percentage', 0) > 80:
                         pattern_description += ", Heavy OTM calls"
                     if details.get('short_term_percentage', 0) > 70:
@@ -1547,6 +1615,11 @@ class InsiderAnomalyDetector:
                         anomaly_data.get('underlying_price'),
                         # Model prediction
                         anomaly_data.get('predicted_tp100_prob'),
+                        # Exclusion flags (bot-driven, earnings-related)
+                        anomaly_data.get('intraday_price_move_pct'),
+                        anomaly_data.get('is_bot_driven', False),
+                        anomaly_data.get('is_earnings_related', False),
+                        anomaly_data.get('earnings_proximity_days'),
                         datetime.now(self.est_tz)
                     )
                     bulk_data.append(row_data)
@@ -1572,7 +1645,9 @@ class InsiderAnomalyDetector:
                         contract_selection_strategy,
                         volume_rank_percentile, historical_tp100_rate, historical_signal_count,
                         moneyness, days_to_expiry, iv_percentile, gamma_theta_ratio, underlying_price,
-                        predicted_tp100_prob, as_of_timestamp
+                        predicted_tp100_prob,
+                        intraday_price_move_pct, is_bot_driven, is_earnings_related, earnings_proximity_days,
+                        as_of_timestamp
                     ) VALUES %s
                     ON CONFLICT (event_date, symbol)
                     DO UPDATE SET
@@ -1636,6 +1711,10 @@ class InsiderAnomalyDetector:
                         gamma_theta_ratio = EXCLUDED.gamma_theta_ratio,
                         underlying_price = EXCLUDED.underlying_price,
                         predicted_tp100_prob = EXCLUDED.predicted_tp100_prob,
+                        intraday_price_move_pct = EXCLUDED.intraday_price_move_pct,
+                        is_bot_driven = EXCLUDED.is_bot_driven,
+                        is_earnings_related = EXCLUDED.is_earnings_related,
+                        earnings_proximity_days = EXCLUDED.earnings_proximity_days,
                         as_of_timestamp = EXCLUDED.as_of_timestamp,
                         updated_at = CURRENT_TIMESTAMP
                 """
@@ -1661,7 +1740,7 @@ class InsiderAnomalyDetector:
         Called after detection, only for high-conviction alerts.
         """
         import json
-        conn = self.db.connect()
+        conn = db.connect()
         try:
             with conn.cursor() as cur:
                 news = enrichment.get('news', {})
