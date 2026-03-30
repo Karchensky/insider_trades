@@ -14,7 +14,7 @@ import logging
 import requests
 import time
 from datetime import datetime, date
-from typing import List, Dict, Optional, Tuple
+from typing import Any, List, Dict, Optional, Tuple
 from io import StringIO
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -90,25 +90,40 @@ class PolygonOptionContractsScraper:
         finally:
             conn.close()
     
-    def get_symbols_with_new_contracts(self) -> List[str]:
+    def get_symbols_with_new_contracts(self, start_date: Optional[str] = None,
+                                       end_date: Optional[str] = None) -> List[str]:
         """Get symbols that have contracts in daily_option_snapshot but not in option_contracts."""
         logger.info("Comparing daily_option_snapshot vs option_contracts to find symbols with new contracts...")
         
         conn = db.connect()
         try:
             with conn.cursor() as cur:
-                # Simple logic: Find symbols where daily_option_snapshot has contracts 
-                # that don't exist in option_contracts
-                cur.execute("""
-                    SELECT DISTINCT dos.symbol
-                    FROM daily_option_snapshot dos
-                    WHERE NOT EXISTS (
+                where_clauses = [
+                    "dos.volume > 0",
+                    """
+                    NOT EXISTS (
                         SELECT 1 
                         FROM option_contracts oc 
                         WHERE oc.contract_ticker = dos.contract_ticker
                     )
+                    """.strip()
+                ]
+                params: List[Any] = []
+
+                if start_date and end_date:
+                    where_clauses.insert(0, "dos.date BETWEEN %s AND %s")
+                    params.extend([start_date, end_date])
+                    logger.info(f"Limiting new-contract scan to processed dates: {start_date} to {end_date}")
+                else:
+                    where_clauses.insert(0, "dos.date >= CURRENT_DATE - INTERVAL '2 days'")
+                    logger.info("Limiting new-contract scan to the most recent 2 calendar days")
+
+                cur.execute(f"""
+                    SELECT DISTINCT dos.symbol
+                    FROM daily_option_snapshot dos
+                    WHERE {' AND '.join(where_clauses)}
                     ORDER BY dos.symbol
-                """)
+                """, tuple(params))
                 
                 symbols = [row['symbol'] for row in cur.fetchall()]
                 logger.info(f"Found {len(symbols)} symbols with new contracts not in option_contracts table")
@@ -521,13 +536,14 @@ class PolygonOptionContractsScraper:
             'contracts_per_api_call': self.total_contracts_fetched / self.api_calls_made if self.api_calls_made > 0 else 0
         }
 
-    def scrape_incremental_smart(self, symbol_limit: Optional[int] = None, retention_days: int = 30) -> Dict[str, any]:
+    def scrape_incremental_smart(self, symbol_limit: Optional[int] = None, retention_days: int = 30,
+                                 start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, any]:
         """Smart incremental scraping - only process symbols with new contracts in daily_option_snapshot."""
         start_time = datetime.now()
         logger.info("Starting SMART INCREMENTAL option contracts scraping...")
         
         # Get symbols that have new contracts in daily trading
-        symbols = self.get_symbols_with_new_contracts()
+        symbols = self.get_symbols_with_new_contracts(start_date=start_date, end_date=end_date)
         if symbol_limit:
             symbols = symbols[:symbol_limit]
             logger.info(f"Limited to first {symbol_limit} symbols")

@@ -96,7 +96,12 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
         
         # Use smart incremental approach - only process symbols with new contracts
         contract_retention_days = 0 if no_expired_contracts else retention_days
-        contracts_results = contracts_scraper.scrape_incremental_smart(symbol_limit=ticker_limit, retention_days=contract_retention_days)
+        contracts_results = contracts_scraper.scrape_incremental_smart(
+            symbol_limit=ticker_limit,
+            retention_days=contract_retention_days,
+            start_date=start_date,
+            end_date=end_date,
+        )
         
         if contracts_results.get('success'):
             if contracts_results.get('symbols_processed', 0) > 0:
@@ -195,6 +200,9 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     else:
         logger.info("[daily_option_snapshot] No temp_option data found - skipping Greeks/IV update")
 
+    # temp_option open_interest represents the previous business day's close.
+    previous_business_day = stock_scraper.get_previous_trading_day()
+
     # Step 6: Run fresh temp_option data to get correct open_interest for the dates being processed
     logger.info("[temp_option] Step 5b: Running fresh intraday snapshot to get correct open_interest...")
     try:
@@ -204,25 +212,23 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
         opt_scraper = UnifiedOptionsSnapshotScraper()
         loader = BulkStockDataLoader()
         
-        # Get all contract tickers from the dates we're processing
+        # Only refresh the contracts needed for the previous business day OI update.
         from database.core.connection import db
-        contract_tickers = set()
-        cur = s
-        while cur <= e:
-            ds = cur.strftime('%Y-%m-%d')
-            try:
-                if stock_scraper.is_trading_day(cur):
-                    rows = db.execute_query("SELECT DISTINCT contract_ticker FROM daily_option_snapshot WHERE date = %s", (ds,))
-                    contract_tickers.update([r['contract_ticker'] for r in rows])
-            except Exception:
-                pass
-            cur += _td(days=1)
+        rows = db.execute_query(
+            "SELECT DISTINCT contract_ticker FROM daily_option_snapshot WHERE date = %s ORDER BY contract_ticker",
+            (previous_business_day,)
+        )
+        ticker_list = [r['contract_ticker'] for r in rows]
+        if contract_limit:
+            ticker_list = ticker_list[:contract_limit]
+            logger.info(f"[temp_option] Limiting fresh open_interest refresh to first {contract_limit} contracts")
         
-        if contract_tickers:
-            logger.info(f"[temp_option] Fetching fresh data for {len(contract_tickers)} contracts...")
+        if ticker_list:
+            logger.info(
+                f"[temp_option] Fetching fresh data for {len(ticker_list)} contracts from {previous_business_day}..."
+            )
             
             # Use super-batch approach like intraday schedule
-            ticker_list = list(contract_tickers)
             page_size = 250  # Per-request ticker count
             bulk_calls = 100  # Calls per super-batch
             options_workers = 20  # Concurrent workers
@@ -284,7 +290,7 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
             
             logger.info(f"[temp_option] ✓ Fresh intraday data loaded: {total_loaded} total rows - open_interest now reflects correct dates")
         else:
-            logger.warning("[temp_option] No contract tickers found for processing dates")
+            logger.warning(f"[temp_option] No contract tickers found for {previous_business_day}")
             
     except Exception as temp_error:
         logger.error(f"[temp_option] Failed to load fresh intraday data: {temp_error}")
@@ -294,9 +300,6 @@ def run_daily_pipeline(recent_days: int, retention_days: int, include_otc: bool,
     # Use current day temp_option data to update previous business day's records
     # Note: temp_option open_interest represents prior business day's close (handles weekends/holidays)
     logger.info("[daily_option_snapshot] Step 5c: Updating open_interest with fresh temp data...")
-    
-    # Get the previous business day (handles weekends/holidays properly)
-    previous_business_day = stock_scraper.get_previous_trading_day()
     
     logger.info(f"[daily_option_snapshot] Updating open_interest for previous business day: {previous_business_day}")
     try:
@@ -413,5 +416,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 

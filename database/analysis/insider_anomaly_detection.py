@@ -77,6 +77,17 @@ class InsiderAnomalyDetector:
         except Exception as e:
             logger.warning(f"TP100 prediction failed: {e}")
             return None
+
+    @staticmethod
+    def _row_to_dict(row: Any, columns: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Normalize database rows from either RealDictCursor or tuple cursors."""
+        if row is None:
+            return {}
+        if hasattr(row, 'keys'):
+            return dict(row)
+        if columns is None:
+            raise ValueError("columns are required when converting tuple rows")
+        return dict(zip(columns, row))
     
     def run_detection(self) -> Dict[str, Any]:
         """Run high-conviction insider trading anomaly detection (1-10 scoring)."""
@@ -1189,15 +1200,14 @@ class InsiderAnomalyDetector:
         Returns:
             Dict mapping symbol to {rate, signal_count}
         """
-        if not symbols:
+        unique_symbols = list(dict.fromkeys(symbols))
+        if not unique_symbols:
             return {}
         
         conn = db.connect()
         try:
             with conn.cursor() as cur:
-                placeholders = ','.join(['%s'] * len(symbols))
-                
-                cur.execute(f"""
+                cur.execute("""
                     WITH historical_signals AS (
                         SELECT 
                             a.symbol,
@@ -1214,8 +1224,8 @@ class InsiderAnomalyDetector:
                         LEFT JOIN daily_option_snapshot o_entry
                             ON a.recommended_option = o_entry.contract_ticker
                             AND a.event_date = o_entry.date
-                        WHERE a.symbol IN ({placeholders})
-                          AND a.event_date >= CURRENT_DATE - INTERVAL '%s days'
+                        WHERE a.symbol = ANY(%s)
+                          AND a.event_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
                           AND a.event_date < CURRENT_DATE
                           AND a.is_high_conviction = TRUE
                           AND a.recommended_option IS NOT NULL
@@ -1227,11 +1237,15 @@ class InsiderAnomalyDetector:
                     FROM historical_signals
                     WHERE entry_price IS NOT NULL AND entry_price > 0
                     GROUP BY symbol
-                """, (*symbols, lookback_days))
+                """, (unique_symbols, lookback_days))
                 
                 results = {}
+                columns = [desc[0] for desc in cur.description]
                 for row in cur.fetchall():
-                    symbol, signal_count, tp100_count = row
+                    data = self._row_to_dict(row, columns)
+                    symbol = data.get('symbol')
+                    signal_count = int(data.get('signal_count') or 0)
+                    tp100_count = int(data.get('tp100_count') or 0)
                     rate = tp100_count / signal_count if signal_count > 0 else None
                     results[symbol] = {
                         'rate': rate,
@@ -1239,7 +1253,7 @@ class InsiderAnomalyDetector:
                         'tp100_count': tp100_count
                     }
                 
-                for symbol in symbols:
+                for symbol in unique_symbols:
                     if symbol not in results:
                         results[symbol] = {'rate': None, 'signal_count': 0, 'tp100_count': 0}
                 
@@ -1248,72 +1262,111 @@ class InsiderAnomalyDetector:
             conn.close()
     
     def _get_contract_features(self, contract_ticker: str, event_date) -> Dict[str, Any]:
+        """Get additional features for a specific contract."""
+        return self._get_contract_features_bulk([contract_ticker], event_date).get(contract_ticker, {})
+
+    def _get_contract_features_bulk(self, contract_tickers: List[str], event_date) -> Dict[str, Dict[str, Any]]:
         """
-        Get additional features for a specific contract.
+        Get additional features for multiple contracts in one query.
         
         Args:
-            contract_ticker: The option contract ticker
+            contract_tickers: Option contract tickers
             event_date: The event date
         
         Returns:
-            Dict with moneyness, days_to_expiry, iv_percentile, gamma_theta_ratio
+            Dict keyed by contract ticker with moneyness, days_to_expiry,
+            iv_percentile, gamma_theta_ratio, and underlying_price.
         """
+        unique_contracts = list(dict.fromkeys(t for t in contract_tickers if t))
+        if not unique_contracts:
+            return {}
+
         conn = db.connect()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT 
-                        oc.strike_price,
-                        oc.expiration_date,
-                        o.implied_volatility,
-                        o.greeks_gamma,
-                        o.greeks_theta,
-                        COALESCE(s.close, s.weighted_average_price) AS underlying_price
-                    FROM option_contracts oc
-                    LEFT JOIN daily_option_snapshot o 
-                        ON oc.contract_ticker = o.contract_ticker AND o.date = %s
-                    LEFT JOIN daily_stock_snapshot s
-                        ON oc.underlying_ticker = s.symbol AND s.date = %s
-                    WHERE oc.contract_ticker = %s
-                """, (event_date, event_date, contract_ticker))
-                
-                row = cur.fetchone()
-                if not row:
-                    return {}
-                
-                strike, expiry, iv, gamma, theta, underlying = row
-                
-                features = {}
-                
-                if underlying and underlying > 0 and strike:
-                    features['moneyness'] = float(strike) / float(underlying)
-                    features['underlying_price'] = float(underlying)
-                
-                if expiry:
-                    if isinstance(expiry, str):
-                        from datetime import datetime
-                        expiry = datetime.strptime(expiry, '%Y-%m-%d').date()
-                    features['days_to_expiry'] = (expiry - event_date).days
-                
-                if gamma is not None and theta is not None and abs(theta) > 0.001:
-                    features['gamma_theta_ratio'] = float(gamma) / abs(float(theta))
-                
-                if iv is not None:
-                    cur.execute("""
+                    WITH contract_base AS (
                         SELECT 
-                            PERCENT_RANK() OVER (ORDER BY implied_volatility) * 100 AS iv_pct
+                            oc.contract_ticker,
+                            oc.strike_price,
+                            oc.expiration_date,
+                            o.implied_volatility,
+                            o.greeks_gamma,
+                            o.greeks_theta,
+                            COALESCE(s.close, s.weighted_average_price) AS underlying_price
+                        FROM option_contracts oc
+                        LEFT JOIN daily_option_snapshot o
+                            ON oc.contract_ticker = o.contract_ticker AND o.date = %s
+                        LEFT JOIN daily_stock_snapshot s
+                            ON oc.underlying_ticker = s.symbol AND s.date = %s
+                        WHERE oc.contract_ticker = ANY(%s)
+                    ),
+                    iv_history AS (
+                        SELECT
+                            contract_ticker,
+                            PERCENT_RANK() OVER (
+                                PARTITION BY contract_ticker
+                                ORDER BY implied_volatility
+                            ) * 100 AS iv_pct,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY contract_ticker
+                                ORDER BY date DESC
+                            ) AS recency_rank
                         FROM daily_option_snapshot
-                        WHERE contract_ticker = %s
+                        WHERE contract_ticker = ANY(%s)
                           AND date <= %s
                           AND implied_volatility IS NOT NULL
-                        ORDER BY date DESC
-                        LIMIT 1
-                    """, (contract_ticker, event_date))
-                    iv_row = cur.fetchone()
-                    if iv_row:
-                        features['iv_percentile'] = iv_row[0]
-                
-                return features
+                    )
+                    SELECT
+                        cb.contract_ticker,
+                        cb.strike_price,
+                        cb.expiration_date,
+                        cb.implied_volatility,
+                        cb.greeks_gamma,
+                        cb.greeks_theta,
+                        cb.underlying_price,
+                        ih.iv_pct
+                    FROM contract_base cb
+                    LEFT JOIN iv_history ih
+                        ON ih.contract_ticker = cb.contract_ticker
+                       AND ih.recency_rank = 1
+                """, (event_date, event_date, unique_contracts, unique_contracts, event_date))
+
+                features_by_contract = {}
+                columns = [desc[0] for desc in cur.description]
+                for row in cur.fetchall():
+                    data = self._row_to_dict(row, columns)
+                    contract_ticker = data.get('contract_ticker')
+                    if not contract_ticker:
+                        continue
+
+                    strike = data.get('strike_price')
+                    expiry = data.get('expiration_date')
+                    gamma = data.get('greeks_gamma')
+                    theta = data.get('greeks_theta')
+                    underlying = data.get('underlying_price')
+                    iv_pct = data.get('iv_pct')
+
+                    features = {}
+
+                    if underlying is not None and strike is not None and float(underlying) > 0:
+                        features['moneyness'] = float(strike) / float(underlying)
+                        features['underlying_price'] = float(underlying)
+
+                    if expiry:
+                        if isinstance(expiry, str):
+                            expiry = datetime.strptime(expiry, '%Y-%m-%d').date()
+                        features['days_to_expiry'] = (expiry - event_date).days
+
+                    if gamma is not None and theta is not None and abs(float(theta)) > 0.001:
+                        features['gamma_theta_ratio'] = float(gamma) / abs(float(theta))
+
+                    if iv_pct is not None:
+                        features['iv_percentile'] = float(iv_pct)
+
+                    features_by_contract[contract_ticker] = features
+
+                return features_by_contract
         finally:
             conn.close()
     
@@ -1332,8 +1385,14 @@ class InsiderAnomalyDetector:
         
         volume_ranks = self._compute_cross_sectional_rank(anomalies_data)
         
-        symbols = [a['symbol'] for a in anomalies_data]
+        symbols = list(dict.fromkeys(a['symbol'] for a in anomalies_data))
         historical_rates = self._get_historical_tp100_rates(symbols)
+        recommended_options = list(dict.fromkeys(
+            a['recommended_option']
+            for a in anomalies_data
+            if a.get('recommended_option')
+        ))
+        contract_features = self._get_contract_features_bulk(recommended_options, self.current_date)
         
         for anomaly in anomalies_data:
             symbol = anomaly['symbol']
@@ -1345,15 +1404,12 @@ class InsiderAnomalyDetector:
             anomaly['historical_signal_count'] = hist.get('signal_count', 0)
             
             if anomaly.get('recommended_option'):
-                contract_features = self._get_contract_features(
-                    anomaly['recommended_option'], 
-                    self.current_date
-                )
-                anomaly['moneyness'] = contract_features.get('moneyness')
-                anomaly['days_to_expiry'] = contract_features.get('days_to_expiry')
-                anomaly['iv_percentile'] = contract_features.get('iv_percentile')
-                anomaly['gamma_theta_ratio'] = contract_features.get('gamma_theta_ratio')
-                anomaly['underlying_price'] = contract_features.get('underlying_price')
+                option_features = contract_features.get(anomaly['recommended_option'], {})
+                anomaly['moneyness'] = option_features.get('moneyness')
+                anomaly['days_to_expiry'] = option_features.get('days_to_expiry')
+                anomaly['iv_percentile'] = option_features.get('iv_percentile')
+                anomaly['gamma_theta_ratio'] = option_features.get('gamma_theta_ratio')
+                anomaly['underlying_price'] = option_features.get('underlying_price')
         
         # Add model predictions if model is available
         if self._tp100_model is not None:
@@ -1679,13 +1735,16 @@ class InsiderAnomalyDetector:
                 """, (symbol, self.current_date))
                 
                 row = cur.fetchone()
-                if row and row[0] > 0:
+                data = self._row_to_dict(row, ['snapshot_count', 'max_persistence', 'latest_timestamp']) if row else {}
+                snapshot_count = int(data.get('snapshot_count') or 0)
+                persistence_count = int(data.get('max_persistence') or 1) if snapshot_count > 0 else 0
+                if snapshot_count > 0:
                     return {
                         'symbol': symbol,
-                        'snapshot_count': row[0],
-                        'persistence_count': row[1] or 1,
-                        'latest_timestamp': row[2],
-                        'meets_threshold': (row[1] or 1) >= min_persistence
+                        'snapshot_count': snapshot_count,
+                        'persistence_count': persistence_count,
+                        'latest_timestamp': data.get('latest_timestamp'),
+                        'meets_threshold': persistence_count >= min_persistence
                     }
                 
                 return {
@@ -1744,7 +1803,8 @@ class InsiderAnomalyDetector:
                     """, (symbol, self.current_date, symbol, self.current_date))
                     
                     row = cur.fetchone()
-                    new_count = row[0] if row else 1
+                    data = self._row_to_dict(row, ['new_count']) if row else {}
+                    new_count = int(data.get('new_count') or 1)
                     persistence_counts[symbol] = new_count
                     
                     cur.execute("""
@@ -1806,7 +1866,7 @@ class InsiderAnomalyDetector:
                           'total_magnitude', 'recommended_option', 'contract_candidates', 
                           'best_gamma_contract', 'as_of_timestamp']
                 
-                return [dict(zip(columns, row)) for row in rows]
+                return [self._row_to_dict(row, columns) for row in rows]
         finally:
             conn.close()
 
